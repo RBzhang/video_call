@@ -12,6 +12,7 @@ class MainWindow;
 QT_END_NAMESPACE
 
 class CameraWorker;
+class QCloseEvent;
 class QThread;
 
 class MainWindow : public QMainWindow
@@ -25,6 +26,9 @@ public:
 signals:
     void requestStartCamera(int cameraIndex);
     void requestStopCamera();
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void onStartCameraClicked();

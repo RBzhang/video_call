@@ -3,6 +3,9 @@
 
 #include "./ui_mainwindow.h"
 
+#include <QCloseEvent>
+#include <QDebug>
+#include <QMetaObject>
 #include <QPixmap>
 #include <QThread>
 
@@ -12,9 +15,6 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
-    // The thread intentionally has no MainWindow parent.  If a camera driver
-    // blocks inside VideoCapture::open(), shutdown must not destroy a running
-    // QThread object after the bounded wait below has expired.
     m_cameraThread = new QThread;
     m_cameraWorker = new CameraWorker;
     m_cameraWorker->moveToThread(m_cameraThread);
@@ -82,6 +82,12 @@ MainWindow::~MainWindow()
 {
     shutdownCameraThread();
     delete ui;
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    shutdownCameraThread();
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::onStartCameraClicked()
@@ -222,35 +228,55 @@ void MainWindow::shutdownCameraThread()
         return;
     }
 
-    if (!cameraThread->isRunning()) {
-        m_cameraThread = nullptr;
-        delete cameraThread;
+    const bool calledFromCameraThread = QThread::currentThread() == cameraThread;
+    Q_ASSERT(!calledFromCameraThread);
+    if (calledFromCameraThread) {
+        qCritical().noquote()
+            << QStringLiteral("[MainWindow] 禁止在摄像头线程中等待自身退出。");
         return;
     }
 
-    // Keep the stop request asynchronous.  A camera backend can block in
-    // VideoCapture::open(), in which case a BlockingQueuedConnection would
-    // also block the GUI thread indefinitely.
-    if (m_cameraWorker) {
-        emit requestStopCamera();
-    }
-    cameraThread->quit();
-
-    constexpr unsigned long shutdownWaitTimeoutMs = 500;
-    if (cameraThread->wait(shutdownWaitTimeoutMs)) {
-        m_cameraThread = nullptr;
-        m_cameraWorker = nullptr;
-        delete cameraThread;
+    if (!m_cameraWorker) {
+        qCritical().noquote() << QStringLiteral("[MainWindow] CameraWorker 不可用，无法执行安全退出。");
         return;
     }
 
-    // Do not destroy a still-running QThread.  Its event loop will perform
-    // the queued stop/release operation once the driver returns from open().
-    // The process can now exit without waiting indefinitely for that driver.
-    connect(cameraThread,
-            &QThread::finished,
-            cameraThread,
-            &QObject::deleteLater);
-    m_cameraWorker = nullptr;
+    qInfo().noquote() << QStringLiteral("[MainWindow] 开始停止 CameraWorker。");
+    const bool stopInvoked = QMetaObject::invokeMethod(
+        m_cameraWorker,
+        &CameraWorker::stopCamera,
+        Qt::BlockingQueuedConnection);
+    if (!stopInvoked) {
+        qCritical().noquote() << QStringLiteral("[MainWindow] stopCamera 调用未投递。");
+        return;
+    }
+    qInfo().noquote() << QStringLiteral("[MainWindow] stopCamera 完成。");
+
+    qInfo().noquote() << QStringLiteral("[MainWindow] 开始 quit 摄像头线程。");
+    const bool quitInvoked = QMetaObject::invokeMethod(
+        m_cameraWorker,
+        [] { QThread::currentThread()->quit(); },
+        Qt::BlockingQueuedConnection);
+    if (!quitInvoked) {
+        qCritical().noquote()
+            << QStringLiteral("[MainWindow] QThread::quit() 调用未投递。");
+        return;
+    }
+
+    const bool waitSucceeded = cameraThread->wait();
+    qInfo().noquote()
+        << QStringLiteral("[MainWindow] 摄像头线程 wait 返回：") << waitSucceeded;
+
+    Q_ASSERT(waitSucceeded);
+    if (!waitSucceeded) {
+        qCritical().noquote()
+            << QStringLiteral("[MainWindow] 摄像头线程未结束，拒绝删除 QThread。");
+        return;
+    }
+
     m_cameraThread = nullptr;
+    m_cameraWorker = nullptr;
+
+    qInfo().noquote() << QStringLiteral("[MainWindow] 删除 QThread。");
+    delete cameraThread;
 }

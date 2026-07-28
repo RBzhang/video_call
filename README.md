@@ -62,7 +62,9 @@ OPENCV_VIDEOIO_DEBUG=1
 
 摄像头打开是设备驱动调用，`cv::VideoCapture::open()` 对 Windows 的 DirectShow 和 Media Foundation 后端可能同步阻塞。OpenCV 的 `CAP_PROP_OPEN_TIMEOUT_MSEC` 只适用于 FFmpeg/GStreamer，不能用来可靠限制本机摄像头后端的打开时间。
 
-因此程序会先异步请求停止并退出摄像头线程，最多等待 500 ms。通常情况下，工作线程会在该时间内停止定时器、释放摄像头并退出；若底层驱动仍卡在 `open()` 或读取调用中，主窗口不会无限等待，也不会销毁仍在运行的 `QThread`。该线程会在驱动调用返回后完成排队的释放和自销毁；若用户已退出整个程序，Windows 会回收进程资源。
+关闭主窗口时，GUI 线程会确认自己不是摄像头线程，再以 `Qt::BlockingQueuedConnection` 在 `CameraWorker` 所在线程同步调用 `stopCamera()`。该调用会停止 `QTimer`、释放 `cv::VideoCapture`，随后在摄像头线程调用 `QThread::quit()`，并由 GUI 线程无超时地 `QThread::wait()`。仅在 `wait()` 确认工作线程结束后才删除 `QThread`；不会让摄像头线程在 `QApplication` 退出后继续运行，也不会手动删除 `CameraWorker`。
+
+调试输出会记录停止 `CameraWorker`、`stopCamera()` 完成、开始 `quit()`、`wait()` 返回、`CameraWorker` 析构和 `QThread` 删除的顺序，可用于核对退出阶段的对象生命周期。
 
 ## 下一步
 

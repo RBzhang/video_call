@@ -32,6 +32,8 @@ CameraWorker::CameraWorker(QObject *parent)
 
 CameraWorker::~CameraWorker()
 {
+    qInfo().noquote() << QStringLiteral("[CameraWorker] 析构。");
+
     if (m_captureTimer && m_captureTimer->isActive()) {
         m_captureTimer->stop();
     }
