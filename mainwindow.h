@@ -1,6 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <QHostAddress>
 #include <QImage>
 #include <QMainWindow>
 #include <QString>
@@ -33,6 +34,7 @@ protected:
 private slots:
     void onStartCameraClicked();
     void onStopCameraClicked();
+    void onApplyNetworkSettingsClicked();
     void onCameraStarted(const QString &description);
     void onCameraStopped();
     void onCameraError(const QString &message);
@@ -48,8 +50,12 @@ private:
     CameraWorker *m_cameraWorker = nullptr;
     QThread *m_cameraThread = nullptr;
     QImage m_lastFrame;
+    QHostAddress m_peerAddress;
+    quint16 m_localVideoPort = 5000;
+    quint16 m_peerVideoPort = 5000;
     bool m_cameraRunning = false;
     bool m_cameraOpening = false;
     bool m_shuttingDown = false;
+    bool m_networkSettingsValid = false;
 };
 #endif // MAINWINDOW_H

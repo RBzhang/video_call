@@ -9,8 +9,14 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS
+    Widgets
+    Network
+)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS
+    Widgets
+    Network
+)
 
 if(NOT DEFINED OpenCV_DIR)
     set(OpenCV_DIR
@@ -38,6 +44,8 @@ set(PROJECT_SOURCES
         mainwindow.ui
         cameraworker.cpp
         cameraworker.h
+        videopacketprotocol.cpp
+        videopacketprotocol.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
@@ -65,8 +73,32 @@ endif()
 
 target_link_libraries(video_call PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${QT_VERSION_MAJOR}::Network
     ${OpenCV_LIBS}
 )
+
+include(CTest)
+
+if(BUILD_TESTING)
+    add_executable(video_packet_protocol_test
+        tests/videopacketprotocol_test.cpp
+        videopacketprotocol.cpp
+        videopacketprotocol.h
+    )
+
+    target_link_libraries(video_packet_protocol_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+    )
+
+    target_include_directories(video_packet_protocol_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME video_packet_protocol_test
+        COMMAND video_packet_protocol_test
+    )
+endif()
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an

@@ -73,6 +73,10 @@ MainWindow::MainWindow(QWidget *parent)
             &QPushButton::clicked,
             this,
             &MainWindow::onStopCameraClicked);
+    connect(ui->applyNetworkSettingsButton,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::onApplyNetworkSettingsClicked);
 
     resetCameraUi();
     m_cameraThread->start();
@@ -126,6 +130,33 @@ void MainWindow::onStopCameraClicked()
     ui->statusLabel->setText(QStringLiteral("状态：正在停止摄像头……"));
 
     emit requestStopCamera();
+}
+
+void MainWindow::onApplyNetworkSettingsClicked()
+{
+    const QString addressText = ui->peerAddressLineEdit->text().trimmed();
+    const int localPort = ui->localVideoPortSpinBox->value();
+    const int peerPort = ui->peerVideoPortSpinBox->value();
+
+    QHostAddress candidateAddress;
+    const bool isValidIpv4 = candidateAddress.setAddress(addressText)
+        && candidateAddress.protocol() == QAbstractSocket::IPv4Protocol;
+    if (!isValidIpv4) {
+        m_networkSettingsValid = false;
+        ui->networkStatusLabel->setText(QStringLiteral("网络：对端 IPv4 地址无效"));
+        return;
+    }
+
+    m_peerAddress = candidateAddress;
+    m_localVideoPort = static_cast<quint16>(localPort);
+    m_peerVideoPort = static_cast<quint16>(peerPort);
+    m_networkSettingsValid = true;
+
+    ui->networkStatusLabel->setText(
+        QStringLiteral("网络：已配置，本地 0.0.0.0:%1 → %2:%3")
+            .arg(m_localVideoPort)
+            .arg(m_peerAddress.toString())
+            .arg(m_peerVideoPort));
 }
 
 void MainWindow::onCameraStarted(const QString &description)
