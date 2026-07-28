@@ -46,6 +46,10 @@ set(PROJECT_SOURCES
         cameraworker.h
         videopacketprotocol.cpp
         videopacketprotocol.h
+        videoframereassembler.cpp
+        videoframereassembler.h
+        videoudptransport.cpp
+        videoudptransport.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
@@ -97,6 +101,52 @@ if(BUILD_TESTING)
     add_test(
         NAME video_packet_protocol_test
         COMMAND video_packet_protocol_test
+    )
+
+    add_executable(video_frame_reassembler_test
+        tests/videoframereassembler_test.cpp
+        videoframereassembler.cpp
+        videoframereassembler.h
+        videopacketprotocol.cpp
+        videopacketprotocol.h
+    )
+
+    target_link_libraries(video_frame_reassembler_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+        Qt${QT_VERSION_MAJOR}::Network
+    )
+
+    target_include_directories(video_frame_reassembler_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME video_frame_reassembler_test
+        COMMAND video_frame_reassembler_test
+    )
+
+    add_executable(video_udp_transport_test
+        tests/videoudptransport_test.cpp
+        videoudptransport.cpp
+        videoudptransport.h
+        videoframereassembler.cpp
+        videoframereassembler.h
+        videopacketprotocol.cpp
+        videopacketprotocol.h
+    )
+
+    target_link_libraries(video_udp_transport_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+        Qt${QT_VERSION_MAJOR}::Network
+    )
+
+    target_include_directories(video_udp_transport_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME video_udp_transport_test
+        COMMAND video_udp_transport_test
     )
 endif()
 
