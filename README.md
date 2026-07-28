@@ -125,6 +125,57 @@ ctest --output-on-failure
 
 两边成功绑定后，任一实例点击“发送测试帧”，另一实例应显示收到有效的 50000 bytes 测试帧。停止网络后可再次绑定。两台真实电脑可以都使用本地端口 5000，但对端 IP 必须填写另一台电脑的局域网 IPv4 地址。
 
+## Python 跨电脑 UDP 验证
+
+`tools/udp_test_receiver.py` 是一个只使用 Python 3.9+ 标准库的 VCL1 UDP 接收与验证程序。它严格解析 32-byte Big Endian 协议头，以“发送端 IPv4 + 发送端端口 + sessionId + frameId”为重组键，支持乱序、完全相同的重复分片、冲突分片丢弃、500 ms 超时清理，以及 16 帧 / 16 MiB 未完成帧缓存限制。
+
+先验证 Python 程序本身：
+
+```bash
+python -m py_compile tools/udp_test_receiver.py
+python tools/udp_test_receiver.py --self-test
+```
+
+自测试会生成并倒序重组一帧 50000-byte 确定性测试帧，检查 43 个分片、重复分片、错误 magic、截断数据报和超时清理；成功时输出 `SELF-TEST PASSED`。
+
+### 同一台电脑测试
+
+先启动 Python 接收器：
+
+```bash
+python tools/udp_test_receiver.py --bind 127.0.0.1 --port 5001 --once
+```
+
+然后在 Qt 程序中设置：
+
+| 设置项 | 值 |
+| --- | --- |
+| 对端 IP | `127.0.0.1` |
+| 本地视频端口 | `5000` |
+| 对端视频端口 | `5001` |
+
+点击“应用网络设置”后，再点击“发送测试帧”。Python 应输出 `[OK]`，其中 `size=50000`、`fragments=43`，并显示测试帧 sequence；`--once` 会在成功校验后以退出码 0 结束。Python 已绑定 5001 时，Qt 程序不能再绑定相同的本地端口。
+
+### 两台电脑测试
+
+电脑 B 运行：
+
+```bash
+python tools/udp_test_receiver.py --bind 0.0.0.0 --port 5000 --once
+```
+
+电脑 A 的 Qt 程序设置：
+
+| 设置项 | 值 |
+| --- | --- |
+| 对端 IP | 电脑 B 的局域网 IPv4 |
+| 本地视频端口 | `5000` |
+| 对端视频端口 | `5000` |
+
+两台不同电脑都可以使用本地 5000。Windows 可能显示 Python 防火墙提示，应允许专用网络访问；也可以手动放行 UDP 5000。Qt `writeDatagram()` 成功只表示本地写入成功，只有 Python 输出 `[OK]` 才证明接收端已经收齐并校验通过。本项目不发送 ACK，也不检测对端是否在线。
+
+此验证工具不实现 JPEG、摄像头帧 UDP 发送、远端视频显示或音频。
+
 ## 摄像头后端诊断与退出行为
 
 摄像头打开是设备驱动调用，`cv::VideoCapture::open()` 对 Windows 的 DirectShow 和 Media Foundation 后端可能同步阻塞。OpenCV 的 `CAP_PROP_OPEN_TIMEOUT_MSEC` 只适用于 FFmpeg/GStreamer，不能用来可靠限制本机摄像头后端的打开时间。
