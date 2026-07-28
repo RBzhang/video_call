@@ -3,7 +3,6 @@
 
 #include "./ui_mainwindow.h"
 
-#include <QMetaObject>
 #include <QPixmap>
 #include <QThread>
 
@@ -13,7 +12,10 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
-    m_cameraThread = new QThread(this);
+    // The thread intentionally has no MainWindow parent.  If a camera driver
+    // blocks inside VideoCapture::open(), shutdown must not destroy a running
+    // QThread object after the bounded wait below has expired.
+    m_cameraThread = new QThread;
     m_cameraWorker = new CameraWorker;
     m_cameraWorker->moveToThread(m_cameraThread);
 
@@ -57,6 +59,11 @@ MainWindow::MainWindow(QWidget *parent)
             this,
             &MainWindow::onCameraError,
             Qt::QueuedConnection);
+    connect(m_cameraWorker,
+            &CameraWorker::diagnosticOccurred,
+            this,
+            &MainWindow::onCameraDiagnostic,
+            Qt::QueuedConnection);
 
     connect(ui->startCameraButton,
             &QPushButton::clicked,
@@ -92,6 +99,7 @@ void MainWindow::onStartCameraClicked()
 
     const int cameraIndex = ui->cameraIndexSpinBox->value();
     m_cameraRunning = false;
+    m_cameraOpening = true;
     ui->startCameraButton->setEnabled(false);
     ui->stopCameraButton->setEnabled(false);
     ui->cameraIndexSpinBox->setEnabled(false);
@@ -121,6 +129,7 @@ void MainWindow::onCameraStarted(const QString &description)
     }
 
     m_cameraRunning = true;
+    m_cameraOpening = false;
     ui->startCameraButton->setEnabled(false);
     ui->stopCameraButton->setEnabled(true);
     ui->cameraIndexSpinBox->setEnabled(false);
@@ -130,6 +139,7 @@ void MainWindow::onCameraStarted(const QString &description)
 void MainWindow::onCameraStopped()
 {
     m_cameraRunning = false;
+    m_cameraOpening = false;
     m_lastFrame = QImage();
 
     if (m_shuttingDown) {
@@ -147,8 +157,18 @@ void MainWindow::onCameraError(const QString &message)
     }
 
     m_cameraRunning = false;
+    m_cameraOpening = false;
     m_lastFrame = QImage();
     resetCameraUi();
+    ui->statusLabel->setText(QStringLiteral("状态：%1").arg(message));
+}
+
+void MainWindow::onCameraDiagnostic(const QString &message)
+{
+    if (m_shuttingDown || !m_cameraOpening) {
+        return;
+    }
+
     ui->statusLabel->setText(QStringLiteral("状态：%1").arg(message));
 }
 
@@ -195,22 +215,42 @@ void MainWindow::shutdownCameraThread()
     }
 
     m_shuttingDown = true;
+    m_cameraOpening = false;
 
-    if (!m_cameraThread || !m_cameraThread->isRunning()) {
+    QThread *cameraThread = m_cameraThread;
+    if (!cameraThread) {
         return;
     }
 
-    if (m_cameraWorker) {
-        if (QThread::currentThread() == m_cameraThread) {
-            m_cameraWorker->stopCamera();
-        } else {
-            QMetaObject::invokeMethod(
-                m_cameraWorker,
-                [worker = m_cameraWorker] { worker->stopCamera(); },
-                Qt::BlockingQueuedConnection);
-        }
+    if (!cameraThread->isRunning()) {
+        m_cameraThread = nullptr;
+        delete cameraThread;
+        return;
     }
 
-    m_cameraThread->quit();
-    m_cameraThread->wait();
+    // Keep the stop request asynchronous.  A camera backend can block in
+    // VideoCapture::open(), in which case a BlockingQueuedConnection would
+    // also block the GUI thread indefinitely.
+    if (m_cameraWorker) {
+        emit requestStopCamera();
+    }
+    cameraThread->quit();
+
+    constexpr unsigned long shutdownWaitTimeoutMs = 500;
+    if (cameraThread->wait(shutdownWaitTimeoutMs)) {
+        m_cameraThread = nullptr;
+        m_cameraWorker = nullptr;
+        delete cameraThread;
+        return;
+    }
+
+    // Do not destroy a still-running QThread.  Its event loop will perform
+    // the queued stop/release operation once the driver returns from open().
+    // The process can now exit without waiting indefinitely for that driver.
+    connect(cameraThread,
+            &QThread::finished,
+            cameraThread,
+            &QObject::deleteLater);
+    m_cameraWorker = nullptr;
+    m_cameraThread = nullptr;
 }

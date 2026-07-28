@@ -32,6 +32,7 @@ private slots:
     void onCameraStarted(const QString &description);
     void onCameraStopped();
     void onCameraError(const QString &message);
+    void onCameraDiagnostic(const QString &message);
     void onFrameReady(const QImage &image);
 
 private:
@@ -44,6 +45,7 @@ private:
     QThread *m_cameraThread = nullptr;
     QImage m_lastFrame;
     bool m_cameraRunning = false;
+    bool m_cameraOpening = false;
     bool m_shuttingDown = false;
 };
 #endif // MAINWINDOW_H

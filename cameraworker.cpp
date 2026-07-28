@@ -2,7 +2,28 @@
 
 #include <cmath>
 
+#include <QDebug>
+#include <QElapsedTimer>
+
 #include <opencv2/imgproc.hpp>
+
+namespace {
+
+QString backendDisplayName(int backend)
+{
+    switch (backend) {
+    case cv::CAP_DSHOW:
+        return QStringLiteral("DirectShow (DSHOW)");
+    case cv::CAP_MSMF:
+        return QStringLiteral("Media Foundation (MSMF)");
+    case cv::CAP_ANY:
+        return QStringLiteral("自动选择 (ANY)");
+    default:
+        return QStringLiteral("未知后端");
+    }
+}
+
+} // namespace
 
 CameraWorker::CameraWorker(QObject *parent)
     : QObject(parent)
@@ -48,10 +69,30 @@ void CameraWorker::startCamera(int cameraIndex)
 
     bool opened = false;
     for (const int backend : backends) {
-        if (tryOpenCamera(cameraIndex, backend, &backendDescription)) {
+        const QString backendName = backendDisplayName(backend);
+        reportDiagnostic(
+            QStringLiteral("摄像头 %1：正在尝试使用 %2 打开。").arg(cameraIndex).arg(backendName));
+
+        QElapsedTimer openTimer;
+        openTimer.start();
+        QString failureReason;
+        if (tryOpenCamera(cameraIndex, backend, &backendDescription, &failureReason)) {
+            reportDiagnostic(
+                QStringLiteral("摄像头 %1：%2 打开成功（耗时 %3 ms，OpenCV 后端：%4）。")
+                    .arg(cameraIndex)
+                    .arg(backendName)
+                    .arg(openTimer.elapsed())
+                    .arg(backendDescription));
             opened = true;
             break;
         }
+
+        reportDiagnostic(
+            QStringLiteral("摄像头 %1：%2 未能打开（耗时 %3 ms，原因：%4）。")
+                .arg(cameraIndex)
+                .arg(backendName)
+                .arg(openTimer.elapsed())
+                .arg(failureReason));
     }
 
     if (!opened) {
@@ -61,7 +102,7 @@ void CameraWorker::startCamera(int cameraIndex)
         m_reportedFps = 0.0;
         m_backendDescription.clear();
         emit errorOccurred(
-            QStringLiteral("无法打开编号为 %1 的摄像头。请检查摄像头编号、系统权限以及设备是否被其他程序占用。")
+            QStringLiteral("无法打开编号为 %1 的摄像头。请检查摄像头编号、系统权限以及设备是否被其他程序占用；已依次尝试 DirectShow、Media Foundation 和自动后端。")
                 .arg(cameraIndex));
         return;
     }
@@ -100,6 +141,8 @@ void CameraWorker::startCamera(int cameraIndex)
 
 void CameraWorker::stopCamera()
 {
+    reportDiagnostic(QStringLiteral("正在停止摄像头。"));
+
     if (m_captureTimer && m_captureTimer->isActive()) {
         m_captureTimer->stop();
     }
@@ -191,18 +234,27 @@ void CameraWorker::captureFrame()
     emit frameReady(image.copy());
 }
 
-bool CameraWorker::tryOpenCamera(int cameraIndex, int backend, QString *backendDescription)
+bool CameraWorker::tryOpenCamera(int cameraIndex,
+                                 int backend,
+                                 QString *backendDescription,
+                                 QString *failureReason)
 {
     releaseCamera();
     bool opened = false;
     try {
         opened = m_camera.open(cameraIndex, backend);
-    } catch (const cv::Exception &) {
+    } catch (const cv::Exception &exception) {
         opened = false;
+        if (failureReason) {
+            *failureReason = QString::fromLocal8Bit(exception.what());
+        }
     }
 
     if (!opened) {
         releaseCamera();
+        if (failureReason && failureReason->isEmpty()) {
+            *failureReason = QStringLiteral("OpenCV open() 返回 false");
+        }
         return false;
     }
 
@@ -222,10 +274,19 @@ bool CameraWorker::tryOpenCamera(int cameraIndex, int backend, QString *backendD
     return true;
 }
 
+void CameraWorker::reportDiagnostic(const QString &message)
+{
+    qInfo().noquote() << QStringLiteral("[CameraWorker]") << message;
+    emit diagnosticOccurred(message);
+}
+
 void CameraWorker::releaseCamera()
 {
-    if (m_camera.isOpened()) {
-        m_camera.release();
+    try {
+        if (m_camera.isOpened()) {
+            m_camera.release();
+        }
+    } catch (const cv::Exception &) {
     }
 }
 

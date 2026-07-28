@@ -21,6 +21,7 @@ signals:
     void cameraStarted(const QString &description);
     void cameraStopped();
     void errorOccurred(const QString &message);
+    void diagnosticOccurred(const QString &message);
 
 public slots:
     void startCamera(int cameraIndex);
@@ -30,7 +31,11 @@ private slots:
     void captureFrame();
 
 private:
-    bool tryOpenCamera(int cameraIndex, int backend, QString *backendDescription);
+    bool tryOpenCamera(int cameraIndex,
+                       int backend,
+                       QString *backendDescription,
+                       QString *failureReason);
+    void reportDiagnostic(const QString &message);
     void releaseCamera();
     QString buildCameraDescription() const;
 
