@@ -929,26 +929,29 @@ void MainWindow::updateVideoSendStatistics()
 
 void MainWindow::updateVideoDisplay()
 {
-    if (m_lastFrame.isNull() || ui->videoLabel->width() <= 0 || ui->videoLabel->height() <= 0) {
+    const QSize targetSize = ui->videoLabel->contentsRect().size();
+    if (m_lastFrame.isNull() || targetSize.width() <= 0 || targetSize.height() <= 0) {
         return;
     }
 
-    const QImage scaledImage = m_lastFrame.scaled(ui->videoLabel->size(),
+    const QImage scaledImage = m_lastFrame.scaled(targetSize,
                                                    Qt::KeepAspectRatio,
                                                    Qt::SmoothTransformation);
+    ui->videoLabel->setText(QString());
     ui->videoLabel->setPixmap(QPixmap::fromImage(scaledImage));
 }
 
 void MainWindow::updateRemoteVideoDisplay()
 {
-    if (m_remoteFrame.isNull() || ui->remoteVideoLabel->width() <= 0
-        || ui->remoteVideoLabel->height() <= 0) {
+    const QSize targetSize = ui->remoteVideoLabel->contentsRect().size();
+    if (m_remoteFrame.isNull() || targetSize.width() <= 0 || targetSize.height() <= 0) {
         return;
     }
 
-    const QImage scaledImage = m_remoteFrame.scaled(ui->remoteVideoLabel->size(),
+    const QImage scaledImage = m_remoteFrame.scaled(targetSize,
                                                      Qt::KeepAspectRatio,
                                                      Qt::SmoothTransformation);
+    ui->remoteVideoLabel->setText(QString());
     ui->remoteVideoLabel->setPixmap(QPixmap::fromImage(scaledImage));
 }
 
@@ -1128,21 +1131,24 @@ void MainWindow::updateRemoteReceiveStatistics()
     const quint16 senderPort = m_lastRemoteSenderPort == 0
         ? m_peerVideoPort
         : m_lastRemoteSenderPort;
-    ui->remoteVideoStatusLabel->setText(
-        QStringLiteral("远端接收：%1:%2，%3×%4，接收 %5 FPS，显示 %6 FPS，JPEG %7 KB/帧，%8 Mbit/s，解码 %9 ms/帧，积压覆盖 %10，失败 %11，外源 %12，不支持 %13")
-            .arg(sender)
-            .arg(senderPort)
-            .arg(m_lastRemoteFrameWidth)
-            .arg(m_lastRemoteFrameHeight)
-            .arg(receivedFps, 0, 'f', 1)
-            .arg(decodedFps, 0, 'f', 1)
-            .arg(averageJpegKilobytes, 0, 'f', 1)
-            .arg(payloadMegabitsPerSecond, 0, 'f', 2)
-            .arg(averageDecodingMilliseconds, 0, 'f', 1)
-            .arg(m_remoteSupersededFramesInterval)
-            .arg(m_remoteDecodeFailuresInterval)
-            .arg(m_remoteForeignFramesInterval)
-            .arg(m_remoteUnsupportedFramesInterval));
+    QString remoteStatus = QStringLiteral("%1:%2｜%3×%4｜接收 %5 FPS｜显示 %6 FPS\nJPEG %7 KB｜%8 Mbit/s｜解码 %9 ms｜覆盖 %10｜失败 %11")
+                               .arg(sender)
+                               .arg(senderPort)
+                               .arg(m_lastRemoteFrameWidth)
+                               .arg(m_lastRemoteFrameHeight)
+                               .arg(receivedFps, 0, 'f', 1)
+                               .arg(decodedFps, 0, 'f', 1)
+                               .arg(averageJpegKilobytes, 0, 'f', 1)
+                               .arg(payloadMegabitsPerSecond, 0, 'f', 2)
+                               .arg(averageDecodingMilliseconds, 0, 'f', 1)
+                               .arg(m_remoteSupersededFramesInterval)
+                               .arg(m_remoteDecodeFailuresInterval);
+    if (m_remoteForeignFramesInterval != 0 || m_remoteUnsupportedFramesInterval != 0) {
+        remoteStatus += QStringLiteral("｜外源 %1｜不支持 %2")
+                            .arg(m_remoteForeignFramesInterval)
+                            .arg(m_remoteUnsupportedFramesInterval);
+    }
+    ui->remoteVideoStatusLabel->setText(remoteStatus);
 
     m_remoteJpegFramesReceivedInterval = 0;
     m_remoteJpegBytesReceivedInterval = 0;

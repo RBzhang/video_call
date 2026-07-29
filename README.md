@@ -14,7 +14,7 @@
 ## 当前已完成
 
 - CMake 已接入 OpenCV `core`、`imgproc`、`videoio` 组件，并完成 Debug/x64 构建验证。
-- 主窗口使用并排的“本地视频 / 远端视频”区域；两个画面都会随窗口缩放按比例重绘。
+- 主窗口使用并排的“本地视频 / 远端视频”区域；每张画面下方都有独立、不透明的状态面板，视频 QLabel 只显示画面或占位文字，状态不会叠加到图像上；两个画面都会随窗口缩放按比例重绘。
 - `CameraWorker` 已通过 `moveToThread()` 运行在专用摄像头线程；GUI 线程只负责界面和 `QPixmap` 创建。
 - `CameraWorker` 使用 `QTimer` 驱动 OpenCV 读取，依次尝试 DirectShow、Media Foundation 和自动后端。
 - 已支持 BGR、BGRA、灰度帧到 `QImage` 的安全深拷贝转换。
