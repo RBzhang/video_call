@@ -28,6 +28,7 @@ endif()
 
 find_package(OpenCV 4.12 REQUIRED COMPONENTS
     core
+    imgcodecs
     imgproc
     videoio
 )
@@ -44,6 +45,8 @@ set(PROJECT_SOURCES
         mainwindow.ui
         cameraworker.cpp
         cameraworker.h
+        jpegframeencoder.cpp
+        jpegframeencoder.h
         videopacketprotocol.cpp
         videopacketprotocol.h
         videoframereassembler.cpp
@@ -147,6 +150,28 @@ if(BUILD_TESTING)
     add_test(
         NAME video_udp_transport_test
         COMMAND video_udp_transport_test
+    )
+
+    add_executable(jpeg_frame_encoder_test
+        tests/jpegframeencoder_test.cpp
+        jpegframeencoder.cpp
+        jpegframeencoder.h
+        videopacketprotocol.h
+    )
+
+    target_link_libraries(jpeg_frame_encoder_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+        ${OpenCV_LIBS}
+    )
+
+    target_include_directories(jpeg_frame_encoder_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${OpenCV_INCLUDE_DIRS}
+    )
+
+    add_test(
+        NAME jpeg_frame_encoder_test
+        COMMAND jpeg_frame_encoder_test
     )
 endif()
 

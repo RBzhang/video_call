@@ -1,5 +1,7 @@
 #include "cameraworker.h"
 
+#include "jpegframeencoder.h"
+
 #include <cmath>
 
 #include <QDebug>
@@ -33,6 +35,8 @@ CameraWorker::CameraWorker(QObject *parent)
 CameraWorker::~CameraWorker()
 {
     qInfo().noquote() << QStringLiteral("[CameraWorker] 析构。");
+
+    stopVideoEncoding();
 
     if (m_captureTimer && m_captureTimer->isActive()) {
         m_captureTimer->stop();
@@ -145,6 +149,8 @@ void CameraWorker::stopCamera()
 {
     reportDiagnostic(QStringLiteral("正在停止摄像头。"));
 
+    stopVideoEncoding();
+
     if (m_captureTimer && m_captureTimer->isActive()) {
         m_captureTimer->stop();
     }
@@ -159,6 +165,34 @@ void CameraWorker::stopCamera()
     m_backendDescription.clear();
 
     emit cameraStopped();
+}
+
+void CameraWorker::startVideoEncoding(int targetFps, int jpegQuality)
+{
+    if (targetFps < 1 || targetFps > 30) {
+        emit videoEncodingError(QStringLiteral("视频发送帧率必须在 1～30 FPS 范围内。"));
+        return;
+    }
+    if (jpegQuality < 1 || jpegQuality > 100) {
+        emit videoEncodingError(QStringLiteral("JPEG quality 必须在 1～100 范围内。"));
+        return;
+    }
+
+    m_videoTargetFps = targetFps;
+    m_jpegQuality = jpegQuality;
+    m_videoFrameIntervalMs = qMax(1, 1000 / m_videoTargetFps);
+    m_videoEncodingEnabled = true;
+    m_videoEncodeTimer.invalidate();
+    m_videoEncodingErrorTimer.invalidate();
+    m_lastVideoEncodingError.clear();
+}
+
+void CameraWorker::stopVideoEncoding()
+{
+    m_videoEncodingEnabled = false;
+    m_videoEncodeTimer.invalidate();
+    m_videoEncodingErrorTimer.invalidate();
+    m_lastVideoEncodingError.clear();
 }
 
 void CameraWorker::captureFrame()
@@ -234,6 +268,27 @@ void CameraWorker::captureFrame()
     }
 
     emit frameReady(image.copy());
+
+    const bool shouldEncode = m_videoEncodingEnabled
+        && (!m_videoEncodeTimer.isValid()
+            || m_videoEncodeTimer.elapsed() >= m_videoFrameIntervalMs);
+    if (!shouldEncode) {
+        return;
+    }
+
+    QString encodingError;
+    const QByteArray jpegData = JpegFrameEncoder::encodeBgrFrame(
+        bgrFrame, m_jpegQuality, &encodingError);
+    m_videoEncodeTimer.restart();
+
+    if (jpegData.isEmpty()) {
+        reportVideoEncodingError(encodingError);
+        return;
+    }
+
+    m_lastVideoEncodingError.clear();
+    m_videoEncodingErrorTimer.invalidate();
+    emit jpegFrameReady(jpegData, bgrFrame.cols, bgrFrame.rows, m_jpegQuality);
 }
 
 bool CameraWorker::tryOpenCamera(int cameraIndex,
@@ -280,6 +335,23 @@ void CameraWorker::reportDiagnostic(const QString &message)
 {
     qInfo().noquote() << QStringLiteral("[CameraWorker]") << message;
     emit diagnosticOccurred(message);
+}
+
+void CameraWorker::reportVideoEncodingError(const QString &message)
+{
+    const QString nonEmptyMessage = message.isEmpty()
+        ? QStringLiteral("JPEG 编码失败。")
+        : message;
+    constexpr qint64 errorReportIntervalMs = 1000;
+    if (m_lastVideoEncodingError == nonEmptyMessage
+        && m_videoEncodingErrorTimer.isValid()
+        && m_videoEncodingErrorTimer.elapsed() < errorReportIntervalMs) {
+        return;
+    }
+
+    m_lastVideoEncodingError = nonEmptyMessage;
+    m_videoEncodingErrorTimer.restart();
+    emit videoEncodingError(nonEmptyMessage);
 }
 
 void CameraWorker::releaseCamera()

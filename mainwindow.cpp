@@ -1,5 +1,6 @@
 #include "mainwindow.h"
 #include "cameraworker.h"
+#include "videopacketprotocol.h"
 #include "videoudptransport.h"
 
 #include "./ui_mainwindow.h"
@@ -12,6 +13,7 @@
 #include <QMetaObject>
 #include <QPixmap>
 #include <QThread>
+#include <QTimer>
 
 namespace {
 
@@ -58,6 +60,13 @@ MainWindow::MainWindow(QWidget *parent)
             this,
             &MainWindow::onUdpDatagramRejected);
 
+    m_videoStatsTimer = new QTimer(this);
+    m_videoStatsTimer->setInterval(1000);
+    connect(m_videoStatsTimer,
+            &QTimer::timeout,
+            this,
+            &MainWindow::updateVideoSendStatistics);
+
     m_cameraThread = new QThread;
     m_cameraWorker = new CameraWorker;
     m_cameraWorker->moveToThread(m_cameraThread);
@@ -80,6 +89,16 @@ MainWindow::MainWindow(QWidget *parent)
             &MainWindow::requestStopCamera,
             m_cameraWorker,
             &CameraWorker::stopCamera,
+            Qt::QueuedConnection);
+    connect(this,
+            &MainWindow::requestStartVideoEncoding,
+            m_cameraWorker,
+            &CameraWorker::startVideoEncoding,
+            Qt::QueuedConnection);
+    connect(this,
+            &MainWindow::requestStopVideoEncoding,
+            m_cameraWorker,
+            &CameraWorker::stopVideoEncoding,
             Qt::QueuedConnection);
 
     connect(m_cameraWorker,
@@ -107,6 +126,16 @@ MainWindow::MainWindow(QWidget *parent)
             this,
             &MainWindow::onCameraDiagnostic,
             Qt::QueuedConnection);
+    connect(m_cameraWorker,
+            &CameraWorker::jpegFrameReady,
+            this,
+            &MainWindow::onJpegFrameReady,
+            Qt::QueuedConnection);
+    connect(m_cameraWorker,
+            &CameraWorker::videoEncodingError,
+            this,
+            &MainWindow::onVideoEncodingError,
+            Qt::QueuedConnection);
 
     connect(ui->startCameraButton,
             &QPushButton::clicked,
@@ -128,13 +157,23 @@ MainWindow::MainWindow(QWidget *parent)
             &QPushButton::clicked,
             this,
             &MainWindow::onSendTestFrameClicked);
+    connect(ui->startVideoSendButton,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::onStartVideoSendClicked);
+    connect(ui->stopVideoSendButton,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::onStopVideoSendClicked);
 
     resetCameraUi();
+    updateVideoSendUi();
     m_cameraThread->start();
 }
 
 MainWindow::~MainWindow()
 {
+    stopVideoSending(QString());
     if (m_videoUdpTransport) {
         m_videoUdpTransport->close();
     }
@@ -144,6 +183,7 @@ MainWindow::~MainWindow()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    stopVideoSending(QStringLiteral("视频发送：窗口正在关闭。"));
     if (m_videoUdpTransport) {
         m_videoUdpTransport->close();
     }
@@ -186,11 +226,14 @@ void MainWindow::onStopCameraClicked()
     ui->cameraIndexSpinBox->setEnabled(false);
     ui->statusLabel->setText(QStringLiteral("状态：正在停止摄像头……"));
 
+    stopVideoSending(QStringLiteral("视频发送：摄像头正在停止。"));
     emit requestStopCamera();
 }
 
 void MainWindow::onApplyNetworkSettingsClicked()
 {
+    stopVideoSending(QStringLiteral("视频发送：网络设置已重新应用，已停止。"));
+
     const QString addressText = ui->peerAddressLineEdit->text().trimmed();
     const int localPort = ui->localVideoPortSpinBox->value();
     const int peerPort = ui->peerVideoPortSpinBox->value();
@@ -207,6 +250,7 @@ void MainWindow::onApplyNetworkSettingsClicked()
         ui->stopNetworkButton->setEnabled(false);
         ui->sendTestFrameButton->setEnabled(false);
         ui->networkStatusLabel->setText(QStringLiteral("网络：对端 IPv4 地址无效"));
+        updateVideoSendUi();
         return;
     }
 
@@ -215,6 +259,7 @@ void MainWindow::onApplyNetworkSettingsClicked()
         ui->stopNetworkButton->setEnabled(false);
         ui->sendTestFrameButton->setEnabled(false);
         ui->networkStatusLabel->setText(QStringLiteral("网络：UDP 传输对象不可用。"));
+        updateVideoSendUi();
         return;
     }
 
@@ -229,6 +274,7 @@ void MainWindow::onApplyNetworkSettingsClicked()
         ui->stopNetworkButton->setEnabled(false);
         ui->sendTestFrameButton->setEnabled(false);
         ui->networkStatusLabel->setText(QStringLiteral("网络：%1").arg(bindError));
+        updateVideoSendUi();
         return;
     }
 
@@ -245,10 +291,12 @@ void MainWindow::onApplyNetworkSettingsClicked()
             .arg(m_localVideoPort)
             .arg(m_peerAddress.toString())
             .arg(m_peerVideoPort));
+    updateVideoSendUi();
 }
 
 void MainWindow::onStopNetworkClicked()
 {
+    stopVideoSending(QStringLiteral("视频发送：网络已停止。"));
     if (m_videoUdpTransport) {
         m_videoUdpTransport->close();
     }
@@ -257,6 +305,7 @@ void MainWindow::onStopNetworkClicked()
     ui->stopNetworkButton->setEnabled(false);
     ui->sendTestFrameButton->setEnabled(false);
     ui->networkStatusLabel->setText(QStringLiteral("网络：已停止"));
+    updateVideoSendUi();
 }
 
 void MainWindow::onSendTestFrameClicked()
@@ -283,6 +332,58 @@ void MainWindow::onSendTestFrameClicked()
         ui->networkStatusLabel->setText(
             QStringLiteral("网络：发送测试帧失败：%1").arg(errorMessage));
     }
+}
+
+void MainWindow::onStartVideoSendClicked()
+{
+    if (m_shuttingDown || m_videoSending) {
+        return;
+    }
+    if (!m_cameraRunning) {
+        ui->videoSendStatusLabel->setText(QStringLiteral("视频发送：请先成功启动摄像头。"));
+        return;
+    }
+    if (!m_networkSettingsValid || !m_videoUdpTransport || !m_videoUdpTransport->isBound()
+        || m_peerAddress.protocol() != QAbstractSocket::IPv4Protocol || m_peerVideoPort == 0) {
+        ui->videoSendStatusLabel->setText(QStringLiteral("视频发送：请先完成有效 UDP 绑定和对端配置。"));
+        return;
+    }
+
+    const int targetFps = ui->videoSendFpsSpinBox->value();
+    const int jpegQuality = ui->jpegQualitySpinBox->value();
+    if (targetFps < 1 || targetFps > 30 || jpegQuality < 1 || jpegQuality > 100) {
+        ui->videoSendStatusLabel->setText(QStringLiteral("视频发送：FPS 或 JPEG quality 参数无效。"));
+        return;
+    }
+
+    m_videoSending = true;
+    m_activeVideoFps = targetFps;
+    m_activeJpegQuality = jpegQuality;
+    m_videoFramesSentTotal = 0;
+    m_videoBytesSentTotal = 0;
+    m_videoFragmentsSentTotal = 0;
+    m_videoFramesSentInterval = 0;
+    m_videoBytesSentInterval = 0;
+    m_videoFragmentsSentInterval = 0;
+    m_lastJpegSize = 0;
+    m_lastFragmentCount = 0;
+    m_lastVideoWidth = 0;
+    m_lastVideoHeight = 0;
+
+    emit requestStartVideoEncoding(targetFps, jpegQuality);
+    if (m_videoStatsTimer) {
+        m_videoStatsTimer->start();
+    }
+    ui->videoSendStatusLabel->setText(
+        QStringLiteral("视频发送：正在以 %1 FPS、JPEG quality %2 编码并发送")
+            .arg(targetFps)
+            .arg(jpegQuality));
+    updateVideoSendUi();
+}
+
+void MainWindow::onStopVideoSendClicked()
+{
+    stopVideoSending(QStringLiteral("视频发送：已停止。"));
 }
 
 void MainWindow::onUdpFrameReceived(const QByteArray &encodedFrame,
@@ -316,6 +417,10 @@ void MainWindow::onUdpFrameSent(quint32 frameId,
                                 qsizetype frameSize,
                                 qsizetype fragmentCount)
 {
+    if (m_videoSending) {
+        return;
+    }
+
     Q_UNUSED(frameId);
     const quint32 sequence = m_lastSentTestFrameSequence;
     ui->networkStatusLabel->setText(
@@ -327,6 +432,9 @@ void MainWindow::onUdpFrameSent(quint32 frameId,
 
 void MainWindow::onUdpNetworkError(const QString &message)
 {
+    if (m_videoSending) {
+        stopVideoSending(QStringLiteral("视频发送：UDP 本地错误：%1").arg(message));
+    }
     ui->networkStatusLabel->setText(QStringLiteral("网络错误：%1").arg(message));
 }
 
@@ -347,10 +455,12 @@ void MainWindow::onCameraStarted(const QString &description)
     ui->stopCameraButton->setEnabled(true);
     ui->cameraIndexSpinBox->setEnabled(false);
     ui->statusLabel->setText(QStringLiteral("状态：%1").arg(description));
+    updateVideoSendUi();
 }
 
 void MainWindow::onCameraStopped()
 {
+    stopVideoSending(QStringLiteral("视频发送：摄像头已停止。"));
     m_cameraRunning = false;
     m_cameraOpening = false;
     m_lastFrame = QImage();
@@ -365,6 +475,7 @@ void MainWindow::onCameraStopped()
 
 void MainWindow::onCameraError(const QString &message)
 {
+    stopVideoSending(QStringLiteral("视频发送：摄像头错误，已停止。"));
     if (m_shuttingDown) {
         return;
     }
@@ -395,6 +506,88 @@ void MainWindow::onFrameReady(const QImage &image)
     updateVideoDisplay();
 }
 
+void MainWindow::onJpegFrameReady(const QByteArray &jpegData,
+                                  int width,
+                                  int height,
+                                  int jpegQuality)
+{
+    if (!m_videoSending) {
+        return;
+    }
+    if (jpegData.isEmpty()) {
+        stopVideoSending(QStringLiteral("视频发送：收到空 JPEG 数据，已停止。"));
+        return;
+    }
+    if (!m_networkSettingsValid || !m_videoUdpTransport || !m_videoUdpTransport->isBound()) {
+        stopVideoSending(QStringLiteral("视频发送：UDP 未绑定，已停止。"));
+        return;
+    }
+    if (jpegData.size() > VideoPacketProtocol::MaximumFrameSize) {
+        stopVideoSending(QStringLiteral("视频发送：JPEG 超过 VCL1 单帧 4 MiB 上限，已停止。"));
+        return;
+    }
+
+    QString sendError;
+    if (!m_videoUdpTransport->sendEncodedFrame(jpegData, &sendError)) {
+        stopVideoSending(QStringLiteral("视频发送：UDP 发送失败：%1").arg(sendError));
+        return;
+    }
+
+    const qsizetype fragmentCount =
+        (jpegData.size() + VideoPacketProtocol::MaximumPayloadSize - 1)
+        / VideoPacketProtocol::MaximumPayloadSize;
+    ++m_videoFramesSentTotal;
+    m_videoBytesSentTotal += static_cast<quint64>(jpegData.size());
+    m_videoFragmentsSentTotal += static_cast<quint64>(fragmentCount);
+    ++m_videoFramesSentInterval;
+    m_videoBytesSentInterval += static_cast<quint64>(jpegData.size());
+    m_videoFragmentsSentInterval += static_cast<quint64>(fragmentCount);
+    m_lastJpegSize = jpegData.size();
+    m_lastFragmentCount = fragmentCount;
+    m_lastVideoWidth = width;
+    m_lastVideoHeight = height;
+    m_activeJpegQuality = jpegQuality;
+}
+
+void MainWindow::onVideoEncodingError(const QString &message)
+{
+    if (m_videoSending) {
+        stopVideoSending(QStringLiteral("视频发送：JPEG 编码错误：%1").arg(message));
+        return;
+    }
+    ui->videoSendStatusLabel->setText(QStringLiteral("视频发送：JPEG 编码错误：%1").arg(message));
+}
+
+void MainWindow::updateVideoSendStatistics()
+{
+    if (!m_videoSending) {
+        return;
+    }
+
+    if (m_videoFramesSentInterval == 0) {
+        ui->videoSendStatusLabel->setText(QStringLiteral("视频发送：等待 JPEG 帧……"));
+        return;
+    }
+
+    const double frames = static_cast<double>(m_videoFramesSentInterval);
+    const double averageJpegKilobytes = static_cast<double>(m_videoBytesSentInterval) / frames / 1024.0;
+    const double payloadMegabitsPerSecond =
+        static_cast<double>(m_videoBytesSentInterval) * 8.0 / 1000000.0;
+    const double averageFragments = static_cast<double>(m_videoFragmentsSentInterval) / frames;
+    ui->videoSendStatusLabel->setText(
+        QStringLiteral("视频发送：%1×%2，%3 FPS，JPEG %4 KB/帧，%5 Mbit/s，%6 分片/帧")
+            .arg(m_lastVideoWidth)
+            .arg(m_lastVideoHeight)
+            .arg(frames, 0, 'f', 1)
+            .arg(averageJpegKilobytes, 0, 'f', 1)
+            .arg(payloadMegabitsPerSecond, 0, 'f', 2)
+            .arg(averageFragments, 0, 'f', 1));
+
+    m_videoFramesSentInterval = 0;
+    m_videoBytesSentInterval = 0;
+    m_videoFragmentsSentInterval = 0;
+}
+
 void MainWindow::updateVideoDisplay()
 {
     if (m_lastFrame.isNull() || ui->videoLabel->width() <= 0 || ui->videoLabel->height() <= 0) {
@@ -419,6 +612,45 @@ void MainWindow::resetCameraUi()
     ui->videoLabel->clear();
     ui->videoLabel->setText(QStringLiteral("摄像头未启动"));
     ui->statusLabel->setText(QStringLiteral("状态：未启动"));
+    updateVideoSendUi();
+}
+
+void MainWindow::stopVideoSending(const QString &reason)
+{
+    const bool wasSending = m_videoSending;
+    if (wasSending) {
+        emit requestStopVideoEncoding();
+    }
+
+    m_videoSending = false;
+    if (m_videoStatsTimer) {
+        m_videoStatsTimer->stop();
+    }
+    m_videoFramesSentInterval = 0;
+    m_videoBytesSentInterval = 0;
+    m_videoFragmentsSentInterval = 0;
+
+    if (wasSending && !reason.isEmpty()) {
+        ui->videoSendStatusLabel->setText(reason);
+    }
+    updateVideoSendUi();
+}
+
+void MainWindow::updateVideoSendUi()
+{
+    const bool udpReady = m_networkSettingsValid
+        && m_videoUdpTransport
+        && m_videoUdpTransport->isBound()
+        && m_peerAddress.protocol() == QAbstractSocket::IPv4Protocol
+        && m_peerVideoPort != 0;
+    const bool controlsEnabled = !m_shuttingDown && !m_videoSending;
+
+    ui->startVideoSendButton->setEnabled(
+        controlsEnabled && m_cameraRunning && udpReady);
+    ui->stopVideoSendButton->setEnabled(!m_shuttingDown && m_videoSending);
+    ui->videoSendFpsSpinBox->setEnabled(controlsEnabled);
+    ui->jpegQualitySpinBox->setEnabled(controlsEnabled);
+    ui->sendTestFrameButton->setEnabled(controlsEnabled && udpReady);
 }
 
 QByteArray MainWindow::createDeterministicTestFrame(quint32 sequence) const

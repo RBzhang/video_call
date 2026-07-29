@@ -16,6 +16,7 @@ QT_END_NAMESPACE
 class CameraWorker;
 class QCloseEvent;
 class QThread;
+class QTimer;
 class VideoUdpTransport;
 
 class MainWindow : public QMainWindow
@@ -29,6 +30,8 @@ public:
 signals:
     void requestStartCamera(int cameraIndex);
     void requestStopCamera();
+    void requestStartVideoEncoding(int targetFps, int jpegQuality);
+    void requestStopVideoEncoding();
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -39,6 +42,8 @@ private slots:
     void onApplyNetworkSettingsClicked();
     void onStopNetworkClicked();
     void onSendTestFrameClicked();
+    void onStartVideoSendClicked();
+    void onStopVideoSendClicked();
     void onUdpFrameReceived(const QByteArray &encodedFrame,
                             quint32 sessionId,
                             quint32 frameId,
@@ -53,11 +58,19 @@ private slots:
     void onCameraError(const QString &message);
     void onCameraDiagnostic(const QString &message);
     void onFrameReady(const QImage &image);
+    void onJpegFrameReady(const QByteArray &jpegData,
+                          int width,
+                          int height,
+                          int jpegQuality);
+    void onVideoEncodingError(const QString &message);
+    void updateVideoSendStatistics();
 
 private:
     void updateVideoDisplay();
     void resetCameraUi();
     void shutdownCameraThread();
+    void stopVideoSending(const QString &reason);
+    void updateVideoSendUi();
     QByteArray createDeterministicTestFrame(quint32 sequence) const;
     bool validateDeterministicTestFrame(const QByteArray &frame,
                                         quint32 *sequence,
@@ -77,5 +90,20 @@ private:
     bool m_cameraOpening = false;
     bool m_shuttingDown = false;
     bool m_networkSettingsValid = false;
+
+    bool m_videoSending = false;
+    quint64 m_videoFramesSentTotal = 0;
+    quint64 m_videoBytesSentTotal = 0;
+    quint64 m_videoFragmentsSentTotal = 0;
+    quint64 m_videoFramesSentInterval = 0;
+    quint64 m_videoBytesSentInterval = 0;
+    quint64 m_videoFragmentsSentInterval = 0;
+    qsizetype m_lastJpegSize = 0;
+    qsizetype m_lastFragmentCount = 0;
+    int m_lastVideoWidth = 0;
+    int m_lastVideoHeight = 0;
+    int m_activeVideoFps = 10;
+    int m_activeJpegQuality = 60;
+    QTimer *m_videoStatsTimer = nullptr;
 };
 #endif // MAINWINDOW_H

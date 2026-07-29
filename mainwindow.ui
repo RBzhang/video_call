@@ -263,13 +263,56 @@ font-size: 18px;</string>
         </widget>
        </item>
        <item row="3" column="0">
+        <widget class="QLabel" name="videoSendFpsTextLabel">
+         <property name="text">
+          <string>发送帧率：</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="1">
+        <widget class="QSpinBox" name="videoSendFpsSpinBox">
+         <property name="minimum">
+          <number>1</number>
+         </property>
+         <property name="maximum">
+          <number>30</number>
+         </property>
+         <property name="value">
+          <number>10</number>
+         </property>
+         <property name="suffix">
+          <string> FPS</string>
+         </property>
+        </widget>
+       </item>
+       <item row="4" column="0">
+        <widget class="QLabel" name="jpegQualityTextLabel">
+         <property name="text">
+          <string>JPEG 质量：</string>
+         </property>
+        </widget>
+       </item>
+       <item row="4" column="1">
+        <widget class="QSpinBox" name="jpegQualitySpinBox">
+         <property name="minimum">
+          <number>1</number>
+         </property>
+         <property name="maximum">
+          <number>100</number>
+         </property>
+         <property name="value">
+          <number>60</number>
+         </property>
+        </widget>
+       </item>
+       <item row="5" column="0">
         <widget class="QPushButton" name="applyNetworkSettingsButton">
          <property name="text">
           <string>应用网络设置</string>
          </property>
         </widget>
        </item>
-       <item row="3" column="1">
+       <item row="5" column="1">
         <widget class="QPushButton" name="stopNetworkButton">
          <property name="enabled">
           <bool>false</bool>
@@ -279,7 +322,7 @@ font-size: 18px;</string>
          </property>
         </widget>
        </item>
-       <item row="3" column="2">
+       <item row="5" column="2">
         <widget class="QPushButton" name="sendTestFrameButton">
          <property name="enabled">
           <bool>false</bool>
@@ -289,7 +332,37 @@ font-size: 18px;</string>
          </property>
         </widget>
        </item>
-       <item row="4" column="0" colspan="3">
+       <item row="6" column="0">
+        <widget class="QPushButton" name="startVideoSendButton">
+         <property name="enabled">
+          <bool>false</bool>
+         </property>
+         <property name="text">
+          <string>开始发送视频</string>
+         </property>
+        </widget>
+       </item>
+       <item row="6" column="1">
+        <widget class="QPushButton" name="stopVideoSendButton">
+         <property name="enabled">
+          <bool>false</bool>
+         </property>
+         <property name="text">
+          <string>停止发送视频</string>
+         </property>
+        </widget>
+       </item>
+       <item row="7" column="0" colspan="3">
+        <widget class="QLabel" name="videoSendStatusLabel">
+         <property name="text">
+          <string>视频发送：未启动</string>
+         </property>
+         <property name="alignment">
+          <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignVCenter</set>
+         </property>
+        </widget>
+       </item>
+       <item row="8" column="0" colspan="3">
         <widget class="QLabel" name="networkStatusLabel">
          <property name="text">
           <string>网络：未配置</string>

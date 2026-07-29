@@ -23,17 +23,17 @@
 - 已实现 `QUdpSocket` 异步实际发送与接收。网络对象位于 GUI 线程，依赖 `readyRead` 和 Qt 事件循环，不创建新的网络线程。
 - 已定义 UDP 视频分片协议 V1，并实现了固定 32 字节网络字节序协议头、数据报序列化、解析和已编码帧分片。
 - `VideoFrameReassembler` 支持乱序分片、完全相同的重复分片、冲突重复分片丢弃、500 ms 未完成帧超时清理，以及 16 帧/16 MiB 接收缓存限制。
-- 已加入 CTest 协议、重组器和双端点真实 UDP 回环测试，覆盖单分片、多分片、最大负载、常见格式错误、乱序重组和双向发送。
+- 摄像头帧可在 `CameraWorker` 专用线程使用 OpenCV `cv::imencode()` 编码为 JPEG，并按目标帧率交给现有 VCL1 UDP 发送器。
+- 已加入 CTest 协议、重组器、双端点真实 UDP 回环和 JPEG 编解码测试，覆盖单分片、多分片、最大负载、常见格式错误、乱序重组和 JPEG 边界标记与尺寸验证。
 
 ## 明确尚未实现
 
-- 摄像头帧接入 UDP
-- JPEG 编码与解码
-- 远端图像显示
+- Qt 端远端视频显示
+- Qt 双向视频界面
 - 音频
-- 丢包重传、拥塞控制
+- ACK、丢包重传与前向纠错
+- TCP、GStreamer 与 FFmpeg API
 - 加密和身份认证
-- 录像、GStreamer 与 FFmpeg API
 
 ## UDP 视频分片协议 V1
 
@@ -67,6 +67,8 @@
 ## 构建
 
 推荐使用 Qt Creator，选择 Qt 6.11.1 MSVC x64 的 Debug Kit 后直接配置和构建。
+
+修改 `QObject` 派生类的成员后，建议重新运行 CMake 并执行一次全量构建，避免复用旧的目标文件或自动生成文件。
 
 项目在未由外部指定时使用以下 OpenCV CMake 配置目录：
 
@@ -175,6 +177,62 @@ python tools/udp_test_receiver.py --bind 0.0.0.0 --port 5000 --once
 两台不同电脑都可以使用本地 5000。Windows 可能显示 Python 防火墙提示，应允许专用网络访问；也可以手动放行 UDP 5000。Qt `writeDatagram()` 成功只表示本地写入成功，只有 Python 输出 `[OK]` 才证明接收端已经收齐并校验通过。本项目不发送 ACK，也不检测对端是否在线。
 
 此验证工具不实现 JPEG、摄像头帧 UDP 发送、远端视频显示或音频。
+
+## 摄像头 JPEG UDP 发送
+
+启动本地摄像头后，可将 640×480 摄像头帧编码为 JPEG 并单向发送到 Python 接收端。默认参数为目标 `10 FPS`、JPEG quality `60`。JPEG 编码始终在 `CameraWorker` 所在线程完成；GUI 线程只接收已拥有数据的 `QByteArray` 并调用已有的 `VideoUdpTransport`，不会创建新的网络线程。
+
+在“视频网络设置”区域完成 UDP 绑定、启动摄像头后，设置“发送帧率”和“JPEG 质量”，再点击“开始发送视频”。开始发送时会禁用确定性“发送测试帧”按钮和两个编码参数输入；停止发送后会恢复它们。停止连续发送不会停止本地预览或关闭 UDP。重新应用网络设置、停止网络、停止/报错摄像头、UDP 本地错误和关闭窗口都会停止连续发送。
+
+发送状态每秒显示实际成功提交给 `QUdpSocket::writeDatagram()` 的 JPEG payload 统计，例如实际 FPS、平均 JPEG KB/帧、JPEG payload Mbit/s 和平均分片数。该码率不包含 IP、UDP 或以太网开销；`writeDatagram()` 成功也不表示对端已收到。发送端不等待 ACK，也不检测对端是否在线。
+
+## Python JPEG 接收
+
+`tools/udp_jpeg_receiver.py` 复用 `udp_test_receiver.py` 中的 VCL1 协议解析和重组器，并使用 OpenCV Python 解码和显示 JPEG。标准库测试接收器仍不需要第三方依赖；JPEG 显示接收器需要安装：
+
+```bash
+python -m pip install opencv-python
+```
+
+本机或另一台电脑接收并显示：
+
+```bash
+python tools/udp_jpeg_receiver.py --bind 0.0.0.0 --port 5000
+```
+
+无窗口验证一帧：
+
+```bash
+python tools/udp_jpeg_receiver.py --bind 127.0.0.1 --port 5001 --no-display --once
+```
+
+保存第一张成功解码的原始 JPEG：
+
+```bash
+python tools/udp_jpeg_receiver.py --bind 0.0.0.0 --port 5000 --save-first received_first.jpg
+```
+
+显示窗口中按 `q` 或 `ESC` 退出。接收器首次成功解码时输出来源、帧 ID、JPEG 大小、分辨率和分片数，之后每秒输出实际 FPS、JPEG payload 码率、平均 JPEG 大小、重组完成数、JPEG 解码失败数、超时帧与拒绝数据报数。`--no-display --once` 适合无窗口验证；第一帧成功解码后以退出码 0 结束。
+
+### 本机 JPEG 验证
+
+Python：
+
+```bash
+python tools/udp_jpeg_receiver.py --bind 127.0.0.1 --port 5001
+```
+
+Qt：
+
+| 设置项 | 值 |
+| --- | --- |
+| 对端 IP | `127.0.0.1` |
+| 本地视频端口 | `5000` |
+| 对端视频端口 | `5001` |
+| 发送帧率 | `10 FPS` |
+| JPEG 质量 | `60` |
+
+依次应用网络设置、启动摄像头、开始发送视频。Python 应持续显示实时画面；停止发送后不应继续收到新 JPEG，本地摄像头预览仍继续。再次开始发送可恢复传输。两台电脑测试时，电脑 B 可监听 `0.0.0.0:5000`，电脑 A 的 Qt 对端 IP 填电脑 B 的局域网 IPv4；不同电脑都可使用本地端口 5000。Windows 可能要求允许 Python 使用专用网络，或手动放行对应 UDP 端口。
 
 ## 摄像头后端诊断与退出行为
 
