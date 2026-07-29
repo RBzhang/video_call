@@ -8,6 +8,8 @@
 #include <QMainWindow>
 #include <QString>
 
+#include <optional>
+
 QT_BEGIN_NAMESPACE
 namespace Ui {
 class MainWindow;
@@ -16,8 +18,10 @@ QT_END_NAMESPACE
 
 class CameraWorker;
 class QCloseEvent;
+class QResizeEvent;
 class QThread;
 class QTimer;
+class RemoteVideoDecoder;
 class VideoUdpTransport;
 
 class MainWindow : public QMainWindow
@@ -33,9 +37,17 @@ signals:
     void requestStopCamera();
     void requestStartVideoEncoding(int targetFps, int jpegQuality);
     void requestStopVideoEncoding();
+    void requestRemoteJpegDecode(const QByteArray &jpegData,
+                                 quint64 generation,
+                                 quint32 sessionId,
+                                 quint32 frameId,
+                                 quint32 timestampMs,
+                                 const QString &senderAddress,
+                                 quint16 senderPort);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private slots:
     void onStartCameraClicked();
@@ -66,13 +78,53 @@ private slots:
                           qint64 encodingDurationUs);
     void onVideoEncodingError(const QString &message);
     void updateVideoSendStatistics();
+    void onRemoteFrameDecoded(const QImage &image,
+                              qsizetype jpegSize,
+                              qint64 decodingDurationUs,
+                              quint64 generation,
+                              quint32 sessionId,
+                              quint32 frameId,
+                              quint32 timestampMs,
+                              const QString &senderAddress,
+                              quint16 senderPort);
+    void onRemoteFrameDecodeFailed(const QString &message,
+                                   qsizetype jpegSize,
+                                   qint64 decodingDurationUs,
+                                   quint64 generation,
+                                   quint32 sessionId,
+                                   quint32 frameId,
+                                   const QString &senderAddress,
+                                   quint16 senderPort);
+    void updateRemoteReceiveStatistics();
 
 private:
+    struct PendingRemoteJpegFrame
+    {
+        QByteArray jpegData;
+        quint64 generation = 0;
+        quint32 sessionId = 0;
+        quint32 frameId = 0;
+        quint32 timestampMs = 0;
+        QString senderAddress;
+        quint16 senderPort = 0;
+    };
+
     void updateVideoDisplay();
+    void updateRemoteVideoDisplay();
+    void resetRemoteVideoDisplay(const QString &message);
     void resetCameraUi();
+    void setLocalVideoStatus(const QString &message);
     void shutdownCameraThread();
+    void shutdownRemoteDecoderThread();
     void stopVideoSending(const QString &reason);
     void updateVideoSendUi();
+    void scheduleRemoteJpegDecode(PendingRemoteJpegFrame frame);
+    void startRemoteJpegDecode(const PendingRemoteJpegFrame &frame);
+    void completeRemoteJpegDecode();
+    void resetRemoteReceiveState(const QString &message);
+    void clearRemoteReceiveStatistics();
+    void advanceRemoteReceiveGeneration();
+    void reportRemoteDecodeFailure(const QString &message);
     QByteArray createDeterministicTestFrame(quint32 sequence) const;
     bool validateDeterministicTestFrame(const QByteArray &frame,
                                         quint32 *sequence,
@@ -81,8 +133,11 @@ private:
     Ui::MainWindow *ui;
     CameraWorker *m_cameraWorker = nullptr;
     QThread *m_cameraThread = nullptr;
+    RemoteVideoDecoder *m_remoteDecoder = nullptr;
+    QThread *m_remoteDecoderThread = nullptr;
     VideoUdpTransport *m_videoUdpTransport = nullptr;
     QImage m_lastFrame;
+    QImage m_remoteFrame;
     QHostAddress m_peerAddress;
     quint16 m_localVideoPort = 5000;
     quint16 m_peerVideoPort = 5000;
@@ -109,5 +164,25 @@ private:
     int m_activeJpegQuality = 60;
     QTimer *m_videoStatsTimer = nullptr;
     QElapsedTimer m_videoStatsElapsedTimer;
+
+    quint64 m_remoteReceiveGeneration = 1;
+    bool m_remoteDecodeBusy = false;
+    std::optional<PendingRemoteJpegFrame> m_pendingRemoteJpeg;
+    QTimer *m_remoteStatsTimer = nullptr;
+    QElapsedTimer m_remoteStatsElapsedTimer;
+    QElapsedTimer m_remoteDecodeErrorTimer;
+    QString m_lastRemoteDecodeError;
+    QString m_lastRemoteSenderAddress;
+    quint16 m_lastRemoteSenderPort = 0;
+    int m_lastRemoteFrameWidth = 0;
+    int m_lastRemoteFrameHeight = 0;
+    quint64 m_remoteJpegFramesReceivedInterval = 0;
+    quint64 m_remoteJpegBytesReceivedInterval = 0;
+    quint64 m_remoteFramesDecodedInterval = 0;
+    quint64 m_remoteDecodeDurationUsInterval = 0;
+    quint64 m_remoteDecodeFailuresInterval = 0;
+    quint64 m_remoteSupersededFramesInterval = 0;
+    quint64 m_remoteForeignFramesInterval = 0;
+    quint64 m_remoteUnsupportedFramesInterval = 0;
 };
 #endif // MAINWINDOW_H

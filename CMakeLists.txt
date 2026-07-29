@@ -10,10 +10,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS
+    Gui
     Widgets
     Network
 )
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS
+    Gui
     Widgets
     Network
 )
@@ -47,6 +49,10 @@ set(PROJECT_SOURCES
         cameraworker.h
         jpegframeencoder.cpp
         jpegframeencoder.h
+        jpegframedecoder.cpp
+        jpegframedecoder.h
+        remotevideodecoder.cpp
+        remotevideodecoder.h
         videoframerateutils.cpp
         videoframerateutils.h
         videopacketprotocol.cpp
@@ -81,6 +87,8 @@ else()
 endif()
 
 target_link_libraries(video_call PRIVATE
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
     ${OpenCV_LIBS}
@@ -163,7 +171,8 @@ if(BUILD_TESTING)
 
     target_link_libraries(jpeg_frame_encoder_test PRIVATE
         Qt${QT_VERSION_MAJOR}::Core
-        ${OpenCV_LIBS}
+        opencv_core
+        opencv_imgcodecs
     )
 
     target_include_directories(jpeg_frame_encoder_test PRIVATE
@@ -174,6 +183,30 @@ if(BUILD_TESTING)
     add_test(
         NAME jpeg_frame_encoder_test
         COMMAND jpeg_frame_encoder_test
+    )
+
+    add_executable(jpeg_frame_decoder_test
+        tests/jpegframedecoder_test.cpp
+        jpegframedecoder.cpp
+        jpegframedecoder.h
+        videopacketprotocol.h
+    )
+
+    target_link_libraries(jpeg_frame_decoder_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+        Qt${QT_VERSION_MAJOR}::Gui
+        opencv_core
+        opencv_imgcodecs
+        opencv_imgproc
+    )
+
+    target_include_directories(jpeg_frame_decoder_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME jpeg_frame_decoder_test
+        COMMAND jpeg_frame_decoder_test
     )
 
     add_executable(video_frame_rate_utils_test

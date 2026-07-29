@@ -1,6 +1,6 @@
 # video_call
 
-基于 Qt Widgets 和 OpenCV 的 Windows 桌面视频通话项目。当前已完成本机摄像头预览、摄像头 JPEG 的单向 UDP 发送，以及 UDP 视频帧的真实收发、分片与重组基础；暂未实现 Qt 端远端图像显示。
+基于 Qt Widgets 和 OpenCV 的 Windows 桌面视频传输项目。当前已完成本机摄像头预览、JPEG/UDP 发送、VCL1 分片重组，以及 Qt 端远端 JPEG 解码显示；它尚不是包含音频和呼叫控制的完整视频通话系统。
 
 ## 开发环境
 
@@ -13,7 +13,7 @@
 ## 当前已完成
 
 - CMake 已接入 OpenCV `core`、`imgproc`、`videoio` 组件，并完成 Debug/x64 构建验证。
-- 主窗口提供可缩放的视频预览区域、摄像头编号输入框、启动/停止按钮和独立状态标签。
+- 主窗口使用并排的“本地视频 / 远端视频”区域；两个画面都会随窗口缩放按比例重绘。
 - `CameraWorker` 已通过 `moveToThread()` 运行在专用摄像头线程；GUI 线程只负责界面和 `QPixmap` 创建。
 - `CameraWorker` 使用 `QTimer` 驱动 OpenCV 读取，依次尝试 DirectShow、Media Foundation 和自动后端。
 - 已支持 BGR、BGRA、灰度帧到 `QImage` 的安全深拷贝转换。
@@ -25,16 +25,17 @@
 - `VideoFrameReassembler` 支持乱序分片、完全相同的重复分片、冲突重复分片丢弃、500 ms 未完成帧超时清理，以及 16 帧/16 MiB 接收缓存限制。
 - 摄像头帧可在 `CameraWorker` 专用线程使用 OpenCV `cv::imencode()` 编码为 JPEG，并按目标帧率交给现有 VCL1 UDP 发送器。
 - JPEG 发送使用独立的 `Qt::PreciseTimer` 调度，定时器与摄像头抓帧解耦；每次仅编码最新且尚未发送的新 BGR 帧，不会重复发送旧帧。
+- 完整 JPEG 帧在 GUI 线程完成来源过滤后交给 `RemoteVideoDecoder` 专用 `QThread`；GUI 线程不执行 `cv::imdecode()`，也不从 Worker 线程操作 QWidget。
+- 解码调度始终最多保留“一帧处理中 + 一帧最新待处理”。解码较慢时旧 pending 帧会被新帧覆盖，避免无限 queued-signal 积压和旧画面延迟。
+- 远端接收独立于本地摄像头与本地发送；状态栏显示接收/显示 FPS、平均 JPEG 大小、JPEG payload 码率、解码耗时、覆盖帧、失败帧、外源帧和不支持帧。
 - 已加入 CTest 协议、重组器、双端点真实 UDP 回环、JPEG 编解码和帧率区间计算测试，覆盖单分片、多分片、最大负载、常见格式错误、乱序重组、JPEG 边界标记与尺寸验证，以及 1–30 FPS 的调度区间。
 
 ## 明确尚未实现
 
-- Qt 端远端视频显示
-- Qt 双向视频界面
 - 音频
 - ACK、丢包重传与前向纠错
 - TCP、GStreamer 与 FFmpeg API
-- 加密和身份认证
+- H.264、加密、NAT 穿透和身份认证
 
 ## UDP 视频分片协议 V1
 
@@ -109,17 +110,18 @@ OPENCV_VIDEOIO_DEBUG=1
 ctest --output-on-failure
 ```
 
-当前 CTest 包含五个独立控制台测试目标：
+当前 CTest 包含六个独立控制台测试目标：
 
 - `video_packet_protocol_test`：协议序列化、解析与分片。
 - `video_frame_reassembler_test`：乱序、重复、冲突、超时和缓存限制重组测试。
 - `video_udp_transport_test`：两个 `VideoUdpTransport` 端点使用系统分配端口进行真实 UDP 回环测试。
 - `jpeg_frame_encoder_test`：JPEG 编码与解码边界和尺寸验证。
+- `jpeg_frame_decoder_test`：确定性 JPEG 解码、灰度 JPEG、深拷贝，以及空输入、随机字节、截断、缺少 EOI 和超过 4 MiB 输入拒绝。
 - `video_frame_rate_utils_test`：1–30 FPS 的毫秒区间计算，以及非法 FPS 拒绝。
 
-上述测试不依赖 Widgets 或 OpenCV。UDP 回环测试不固定占用 5000 或 5001 端口，测试完成后关闭两个 Socket。
+协议、重组器、UDP 回环和帧率工具测试不依赖 Qt Widgets；`video_udp_transport_test` 依赖 Qt Network；JPEG 编码和解码测试依赖 Qt Core/Gui 与 OpenCV。所有 CTest 都是无交互控制台测试，不需要显示 GUI 窗口。UDP 回环测试不固定占用 5000 或 5001 端口，测试完成后关闭两个 Socket。
 
-最近一次全新 Debug/x64 构建的 `ctest --output-on-failure` 为 `5/5` 通过；`udp_test_receiver.py` 和 `udp_jpeg_receiver.py` 均已通过 `py_compile` 与各自的 `--self-test`。
+最近一次全新 Debug/x64 构建的 `ctest --output-on-failure` 为 `6/6` 通过。`udp_test_receiver.py` 只需要 Python 标准库；`udp_jpeg_receiver.py --self-test` 需要安装 Python OpenCV（`cv2`）。
 
 ## 同机双实例测试
 
@@ -130,7 +132,25 @@ ctest --output-on-failure
 | A | `127.0.0.1` | 5000 | 5001 |
 | B | `127.0.0.1` | 5001 | 5000 |
 
-两边成功绑定后，任一实例点击“发送测试帧”，另一实例应显示收到有效的 50000 bytes 测试帧。停止网络后可再次绑定。两台真实电脑可以都使用本地端口 5000，但对端 IP 必须填写另一台电脑的局域网 IPv4 地址。
+两边成功绑定后，任一实例点击“发送测试帧”，另一实例应显示收到有效的 50000 bytes 测试帧。停止网络后可再次绑定。
+
+### Qt → Qt JPEG 预览
+
+同机只有一个摄像头时，可只在 A 启动摄像头并按以下顺序操作：
+
+1. A、B 分别应用上表的网络设置。
+2. 在 A 启动摄像头，设置 `10 FPS`、JPEG quality `60`，再点击“开始发送视频”。
+3. B 的本地画面保持“摄像头未启动”，右侧远端画面应显示 A 的视频，并约每秒刷新远端统计。
+4. A 点击“停止发送视频”后，B 不再收到新帧并显示“等待对端 JPEG”；再次开始发送后显示恢复。
+5. B 仍可点击“发送测试帧”，A 应显示有效的 50000 bytes 确定性测试帧。
+
+两台真实电脑可以都使用本地端口 5000，但对端 IP 必须填写另一台电脑的局域网 IPv4 地址。两边应用网络设置、各自启动摄像头并开始发送视频后，左侧是本机画面、右侧是对端画面。Windows 防火墙必须允许对应的 UDP 入站端口。本协议不发送 ACK、不重传，也不检测对端在线状态；关闭一端时另一端不会得到“离线”通知。
+
+### 远端接收统计与解码策略
+
+远端统计中的 FPS 以真实统计窗口时间计算。payload 码率只计算 JPEG payload，不包含 VCL1 头、UDP、IP 或以太网开销。`superseded` 表示一个正在解码的 JPEG 后又收到更新帧，旧 pending 帧被替换的次数；这是一项降低实时延迟的正常统计，而不是 UDP 重传。
+
+来源 IP 或端口与当前配置对端不一致的完整帧会计入 `foreign-source` 后直接丢弃。完整帧先区分确定性测试帧与 JPEG；未知格式只计入 `unsupported`，不会关闭 UDP。
 
 ## Python 跨电脑 UDP 验证
 
@@ -257,10 +277,10 @@ Qt：
 
 关闭主窗口时，GUI 线程会确认自己不是摄像头线程，再以 `Qt::BlockingQueuedConnection` 在 `CameraWorker` 所在线程同步调用 `stopCamera()`。该调用会停止 `QTimer`、释放 `cv::VideoCapture`，随后在摄像头线程调用 `QThread::quit()`，并由 GUI 线程无超时地 `QThread::wait()`。仅在 `wait()` 确认工作线程结束后才删除 `QThread`；不会让摄像头线程在 `QApplication` 退出后继续运行，也不会手动删除 `CameraWorker`。
 
-调试输出会记录停止 `CameraWorker`、`stopCamera()` 完成、开始 `quit()`、`wait()` 返回、`CameraWorker` 析构和 `QThread` 删除的顺序，可用于核对退出阶段的对象生命周期。
+关闭时还会先关闭 UDP、递增远端接收 generation、清空 pending JPEG 并停止远端统计，然后让 `RemoteVideoDecoder` 线程退出并 `wait()` 成功后删除其 `QThread`。正在进行的一次 `cv::imdecode()` 可以自然完成，但其旧 generation 结果不会再显示。调试输出会记录摄像头 Worker 和远端 JPEG 解码线程的停止、`quit()`、`wait()` 与对象析构顺序，可用于核对退出阶段的对象生命周期。
 
-在上述全新 Debug 构建中，以下退出场景各连续执行 3 次：不启动摄像头或 UDP、仅绑定 UDP、摄像头预览后直接关闭、先停止摄像头再关闭、摄像头发送 JPEG 时直接关闭。15 次运行均在 0.82 秒内以退出码 0 结束，没有 `video_call.exe` 残留，也没有线程、定时器、Socket、OpenCV 或 Visual C++ Runtime 警告。
+在全新 Debug/x64 构建中，应覆盖以下退出场景：未启动摄像头/UDP、仅绑定 UDP、摄像头运行、摄像头已停止、JPEG 发送、JPEG 接收解码，以及发送与接收同时进行。每次均应在 2 秒内以 exit code 0 结束，且没有 `video_call.exe` 残留、Visual C++ Runtime、QThread、QTimer、Socket 或 OpenCV 警告。
 
 ## 下一步
 
-实现 Qt 端 JPEG 解码和远端图像显示，并在需要时设计音频和可靠性策略。
+在保持无 ACK、无重传的低延迟 UDP 边界前提下，按需求设计音频、呼叫控制和可靠性策略。
