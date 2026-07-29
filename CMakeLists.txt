@@ -47,6 +47,8 @@ set(PROJECT_SOURCES
         mainwindow.cpp
         mainwindow.h
         mainwindow.ui
+        videodisplaylabel.cpp
+        videodisplaylabel.h
         cameraworker.cpp
         cameraworker.h
         jpegframeencoder.cpp

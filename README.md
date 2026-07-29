@@ -14,7 +14,7 @@
 ## 当前已完成
 
 - CMake 已接入 OpenCV `core`、`imgproc`、`videoio` 组件，并完成 Debug/x64 构建验证。
-- 主窗口使用并排的“本地视频 / 远端视频”区域；每张画面下方都有独立、不透明的状态面板，视频 QLabel 只显示画面或占位文字，状态不会叠加到图像上；两个画面都会随窗口缩放按比例重绘。
+- 主窗口使用并排的“本地视频 / 远端视频”区域；`VideoDisplayLabel` 根据当前 640×480 链路保持 4∶3，并以 `KeepAspectRatio` 显示完整画面。每张画面下方都有独立、不透明的状态面板，视频 QLabel 只显示画面或占位文字，状态不会叠加到图像上。视频网络与音频设置左右并排；音频统计固定为两行，设备和缓冲详情仅显示在 tooltip，因此统计刷新不会改变视频区域尺寸。
 - `CameraWorker` 已通过 `moveToThread()` 运行在专用摄像头线程；GUI 线程只负责界面和 `QPixmap` 创建。
 - `CameraWorker` 使用 `QTimer` 驱动 OpenCV 读取，依次尝试 DirectShow、Media Foundation 和自动后端。
 - 已支持 BGR、BGRA、灰度帧到 `QImage` 的安全深拷贝转换。
@@ -96,7 +96,7 @@ ACL1 的 32-byte 头始终按 Big Endian 网络字节序序列化；PCM payload 
 
 接收端使用纯逻辑 `AudioJitterBuffer`：三包预缓冲（60 ms）、最多十包（200 ms）、小范围乱序排序、重复包丢弃和迟到包丢弃。播放缺失包时写入严格的 640-byte 全零静音；连续缺失五包后退出播放状态并重新预缓冲。不会动态变速、拉伸或重采样。
 
-`AudioWorker` 位于独立 `QThread`，拥有 `AudioUdpTransport`、`QAudioSource`、`QAudioSink`、采集/播放 `QIODevice`、20 ms `Qt::PreciseTimer` 和 1 秒统计定时器。采集端把不规则 `readyRead()` 数据累积后按 640 bytes 切包，采集缓存上限为 6400 bytes；播放端正确处理部分写入，待写缓存最多五包。状态会显示实际发送/接收 packets/s、payload Mbit/s、抖动深度、静音补偿、重复/迟到/外源/无效包、输入/播放溢出和实际 Source/Sink bufferSize。
+`AudioWorker` 位于独立 `QThread`，拥有 `AudioUdpTransport`、`QAudioSource`、`QAudioSink`、采集/播放 `QIODevice`、20 ms `Qt::PreciseTimer` 和 1 秒统计定时器。采集端把不规则 `readyRead()` 数据累积后按 640 bytes 切包，采集缓存上限为 6400 bytes；播放端正确处理部分写入，待写缓存最多五包。固定两行状态面板显示实际发送/接收 packets/s、payload Mbit/s、抖动深度、静音补偿、重复/迟到/外源/无效包和输入/播放溢出；输入/输出设备与实际 Source/Sink bufferSize 仅在 tooltip 中提供。
 
 点击“应用音频设置”时复用现有“对端 IP”输入框并验证 IPv4；成功绑定后才可以点击“开始双向音频”。启动时仅使用 `QMediaDevices` 的默认输入和输出，且两者都必须支持 16 kHz / 单声道 / Int16；不支持会显示设备描述及 preferred format，且不会启动或回退为其他网络格式。停止音频只停止音频，不停止摄像头、视频 UDP、视频编码或远端视频显示；重新应用音频设置会停止当前音频、清空抖动缓冲并重新绑定。
 

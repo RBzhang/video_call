@@ -11,10 +11,13 @@
 #include <QCloseEvent>
 #include <QDataStream>
 #include <QDebug>
+#include <QFontMetrics>
 #include <QIODevice>
+#include <QLabel>
 #include <QMetaObject>
 #include <QPixmap>
 #include <QResizeEvent>
+#include <QShowEvent>
 #include <QThread>
 #include <QTimer>
 
@@ -55,6 +58,9 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+    setAudioStatus(QStringLiteral("音频：网络未配置"));
+    updateVideoLabelGeometry(ui->localVideoContainer, ui->videoLabel);
+    updateVideoLabelGeometry(ui->remoteVideoContainer, ui->remoteVideoLabel);
 
     m_videoUdpTransport = new VideoUdpTransport(this);
     connect(m_videoUdpTransport,
@@ -317,8 +323,32 @@ void MainWindow::closeEvent(QCloseEvent *event)
 void MainWindow::resizeEvent(QResizeEvent *event)
 {
     QMainWindow::resizeEvent(event);
+    updateVideoLabelGeometry(ui->localVideoContainer, ui->videoLabel);
+    updateVideoLabelGeometry(ui->remoteVideoContainer, ui->remoteVideoLabel);
     updateVideoDisplay();
     updateRemoteVideoDisplay();
+    refreshAudioStatusText();
+}
+
+void MainWindow::showEvent(QShowEvent *event)
+{
+    QMainWindow::showEvent(event);
+    updateVideoLabelGeometry(ui->localVideoContainer, ui->videoLabel);
+    updateVideoLabelGeometry(ui->remoteVideoContainer, ui->remoteVideoLabel);
+}
+
+void MainWindow::updateVideoLabelGeometry(QWidget *container, QLabel *label)
+{
+    if (!container || !label) {
+        return;
+    }
+
+    const QRect availableRect = container->contentsRect();
+    const int width = qMin(availableRect.width(), availableRect.height() * 4 / 3);
+    const int height = width * 3 / 4;
+    const int x = availableRect.x() + (availableRect.width() - width) / 2;
+    const int y = availableRect.y() + (availableRect.height() - height) / 2;
+    label->setGeometry(x, y, width, height);
 }
 
 void MainWindow::onStartCameraClicked()
@@ -544,7 +574,7 @@ void MainWindow::onApplyAudioSettingsClicked()
         m_audioRunning = false;
         ui->startAudioButton->setEnabled(false);
         ui->stopAudioButton->setEnabled(false);
-        ui->audioStatusLabel->setText(QStringLiteral("音频：对端 IPv4 地址无效"));
+        setAudioStatus(QStringLiteral("音频：对端 IPv4 地址无效"));
         return;
     }
     if (!m_audioWorker || !m_audioThread || !m_audioThread->isRunning()) {
@@ -552,7 +582,7 @@ void MainWindow::onApplyAudioSettingsClicked()
         m_audioRunning = false;
         ui->startAudioButton->setEnabled(false);
         ui->stopAudioButton->setEnabled(false);
-        ui->audioStatusLabel->setText(QStringLiteral("音频：工作线程不可用。"));
+        setAudioStatus(QStringLiteral("音频：工作线程不可用。"));
         return;
     }
 
@@ -560,7 +590,7 @@ void MainWindow::onApplyAudioSettingsClicked()
     m_audioRunning = false;
     ui->startAudioButton->setEnabled(false);
     ui->stopAudioButton->setEnabled(false);
-    ui->audioStatusLabel->setText(QStringLiteral("音频：正在配置网络……"));
+    setAudioStatus(QStringLiteral("音频：正在配置网络……"));
     emit requestConfigureAudioNetwork(peerAddress,
                                       static_cast<quint16>(ui->localAudioPortSpinBox->value()),
                                       static_cast<quint16>(ui->peerAudioPortSpinBox->value()));
@@ -573,13 +603,13 @@ void MainWindow::onStartAudioClicked()
     }
     if (!m_audioNetworkSettingsValid || !m_audioWorker || !m_audioThread
         || !m_audioThread->isRunning()) {
-        ui->audioStatusLabel->setText(QStringLiteral("音频：请先完成有效的音频网络配置。"));
+        setAudioStatus(QStringLiteral("音频：请先完成有效的音频网络配置。"));
         return;
     }
 
     ui->startAudioButton->setEnabled(false);
     ui->stopAudioButton->setEnabled(false);
-    ui->audioStatusLabel->setText(QStringLiteral("音频：正在启动默认输入和输出设备……"));
+    setAudioStatus(QStringLiteral("音频：正在启动默认输入和输出设备……"));
     emit requestStartAudio();
 }
 
@@ -591,7 +621,7 @@ void MainWindow::onStopAudioClicked()
 
     ui->startAudioButton->setEnabled(false);
     ui->stopAudioButton->setEnabled(false);
-    ui->audioStatusLabel->setText(QStringLiteral("音频：正在停止……"));
+    setAudioStatus(QStringLiteral("音频：正在停止……"));
     emit requestStopAudio();
 }
 
@@ -605,7 +635,7 @@ void MainWindow::onAudioNetworkReady(const QString &message)
     m_audioRunning = false;
     ui->startAudioButton->setEnabled(true);
     ui->stopAudioButton->setEnabled(false);
-    ui->audioStatusLabel->setText(message);
+    setAudioStatus(message, QString(), message);
 }
 
 void MainWindow::onAudioStarted(const QString &message)
@@ -617,7 +647,7 @@ void MainWindow::onAudioStarted(const QString &message)
     m_audioRunning = true;
     ui->startAudioButton->setEnabled(false);
     ui->stopAudioButton->setEnabled(true);
-    ui->audioStatusLabel->setText(message);
+    setAudioStatus(message, QString(), message);
 }
 
 void MainWindow::onAudioStopped()
@@ -629,7 +659,7 @@ void MainWindow::onAudioStopped()
 
     ui->startAudioButton->setEnabled(m_audioNetworkSettingsValid);
     ui->stopAudioButton->setEnabled(false);
-    ui->audioStatusLabel->setText(QStringLiteral("音频：已停止（网络保持绑定）"));
+    setAudioStatus(QStringLiteral("音频：已停止（网络保持绑定）"));
 }
 
 void MainWindow::onAudioError(const QString &message)
@@ -641,7 +671,7 @@ void MainWindow::onAudioError(const QString &message)
 
     ui->startAudioButton->setEnabled(m_audioNetworkSettingsValid);
     ui->stopAudioButton->setEnabled(false);
-    ui->audioStatusLabel->setText(QStringLiteral("音频：%1").arg(message));
+    setAudioStatus(QStringLiteral("音频：%1").arg(message), QString(), message);
 }
 
 void MainWindow::onAudioStatisticsUpdated(const AudioStatistics &statistics)
@@ -650,30 +680,30 @@ void MainWindow::onAudioStatisticsUpdated(const AudioStatistics &statistics)
         return;
     }
 
-    ui->audioStatusLabel->setText(
-        QStringLiteral("音频：发送 %1 包/s（%2 Mbit/s），接收 %3 包/s（%4 Mbit/s），抖动 %5 包/%6 ms，静音补偿 %7，重复 %8，迟到 %9，外源 %10，无效 %11，采集溢出 %12，播放溢出 %13，输入缓冲 %14 bytes，输出缓冲 %15 bytes\n输入：%16｜输出：%17")
+    const QString primaryText =
+        QStringLiteral("音频：发送 %1 包/s｜接收 %2 包/s｜发送 %3 Mbit/s｜接收 %4 Mbit/s｜抖动 %5 包/%6 ms")
             .arg(statistics.sentPacketsPerSecond, 0, 'f', 1)
-            .arg(statistics.sentPayloadMegabitsPerSecond, 0, 'f', 3)
             .arg(statistics.receivedPacketsPerSecond, 0, 'f', 1)
+            .arg(statistics.sentPayloadMegabitsPerSecond, 0, 'f', 3)
             .arg(statistics.receivedPayloadMegabitsPerSecond, 0, 'f', 3)
             .arg(statistics.jitterBufferedPackets)
-            .arg(statistics.jitterBufferedMilliseconds)
+            .arg(statistics.jitterBufferedMilliseconds);
+    const QString secondaryText =
+        QStringLiteral("补偿 %1｜重复 %2｜迟到 %3｜外源 %4｜无效 %5｜采集溢出 %6｜播放溢出 %7")
             .arg(statistics.concealedPackets)
             .arg(statistics.duplicatePackets)
             .arg(statistics.latePackets)
             .arg(statistics.foreignPackets)
             .arg(statistics.invalidPackets)
             .arg(statistics.captureOverruns)
-            .arg(statistics.playbackOverruns)
-            .arg(statistics.sourceBufferSize)
-            .arg(statistics.sinkBufferSize)
-            .arg(statistics.inputDeviceDescription, statistics.outputDeviceDescription));
-    ui->audioStatusLabel->setToolTip(
-        QStringLiteral("输入：%1（Source bufferSize=%2）\n输出：%3（Sink bufferSize=%4）")
+            .arg(statistics.playbackOverruns);
+    const QString details =
+        QStringLiteral("输入设备：%1\n输出设备：%2\n输入缓冲：%3 bytes\n输出缓冲：%4 bytes\n当前 PCM 格式：16 kHz / mono / Int16")
             .arg(statistics.inputDeviceDescription)
-            .arg(statistics.sourceBufferSize)
             .arg(statistics.outputDeviceDescription)
-            .arg(statistics.sinkBufferSize));
+            .arg(statistics.sourceBufferSize)
+            .arg(statistics.sinkBufferSize);
+    setAudioStatus(primaryText, secondaryText, details);
 }
 
 void MainWindow::onUdpFrameReceived(const QByteArray &encodedFrame,
@@ -967,6 +997,48 @@ void MainWindow::setLocalVideoStatus(const QString &message)
 {
     ui->statusLabel->setText(message);
     ui->localVideoStatusLabel->setText(message);
+}
+
+void MainWindow::setAudioStatus(const QString &primaryText,
+                                const QString &secondaryText,
+                                const QString &details)
+{
+    m_audioPrimaryStatusText = primaryText.simplified();
+    m_audioSecondaryStatusText = secondaryText.simplified();
+    m_audioStatusDetails = details.isEmpty()
+        ? m_audioPrimaryStatusText
+              + (m_audioSecondaryStatusText.isEmpty()
+                     ? QString()
+                     : QLatin1Char('\n') + m_audioSecondaryStatusText)
+        : details;
+    refreshAudioStatusText();
+}
+
+void MainWindow::refreshAudioStatusText()
+{
+    if (!ui || !ui->audioStatusLabel || !ui->audioSecondaryStatusLabel) {
+        return;
+    }
+
+    ui->audioStatusLabel->setText(elidedTextForLabel(ui->audioStatusLabel,
+                                                      m_audioPrimaryStatusText));
+    ui->audioSecondaryStatusLabel->setText(elidedTextForLabel(ui->audioSecondaryStatusLabel,
+                                                               m_audioSecondaryStatusText));
+    ui->audioStatusPanel->setToolTip(m_audioStatusDetails);
+    ui->audioStatusLabel->setToolTip(m_audioStatusDetails);
+    ui->audioSecondaryStatusLabel->setToolTip(m_audioStatusDetails);
+}
+
+QString MainWindow::elidedTextForLabel(const QLabel *label, const QString &text) const
+{
+    if (!label || text.isEmpty()) {
+        return text;
+    }
+
+    const int availableWidth = label->contentsRect().width();
+    return availableWidth > 0
+        ? QFontMetrics(label->font()).elidedText(text, Qt::ElideRight, availableWidth)
+        : text;
 }
 
 void MainWindow::scheduleRemoteJpegDecode(PendingRemoteJpegFrame frame)

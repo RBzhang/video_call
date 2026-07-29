@@ -19,9 +19,12 @@ QT_END_NAMESPACE
 class CameraWorker;
 class AudioWorker;
 class QCloseEvent;
+class QLabel;
 class QResizeEvent;
+class QShowEvent;
 class QThread;
 class QTimer;
+class QWidget;
 class RemoteVideoDecoder;
 class VideoUdpTransport;
 struct AudioStatistics;
@@ -55,6 +58,7 @@ signals:
 protected:
     void closeEvent(QCloseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
 
 private slots:
     void onStartCameraClicked();
@@ -126,9 +130,15 @@ private:
 
     void updateVideoDisplay();
     void updateRemoteVideoDisplay();
+    void updateVideoLabelGeometry(QWidget *container, QLabel *label);
     void resetRemoteVideoDisplay(const QString &message);
     void resetCameraUi();
     void setLocalVideoStatus(const QString &message);
+    void setAudioStatus(const QString &primaryText,
+                        const QString &secondaryText = QString(),
+                        const QString &details = QString());
+    void refreshAudioStatusText();
+    QString elidedTextForLabel(const QLabel *label, const QString &text) const;
     void shutdownCameraThread();
     void shutdownAudioThread();
     void shutdownRemoteDecoderThread();
@@ -167,6 +177,9 @@ private:
     bool m_networkSettingsValid = false;
     bool m_audioNetworkSettingsValid = false;
     bool m_audioRunning = false;
+    QString m_audioPrimaryStatusText;
+    QString m_audioSecondaryStatusText;
+    QString m_audioStatusDetails;
 
     bool m_videoSending = false;
     quint64 m_videoFramesSentTotal = 0;
