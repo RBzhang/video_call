@@ -332,3 +332,23 @@ Qt：
 ## 下一步
 
 在保持无 ACK、无重传的低延迟 UDP 边界前提下，按需求设计音频压缩、回声处理、呼叫控制或可靠性策略。
+
+## Windows 便携版打包
+
+使用 `scripts/package_windows_release.ps1` 创建 Windows x64 Release 便携包。脚本从全新的 Release 构建目录开始，执行 CTest 和 Python UDP 自测，通过 CMake install 仅安装主程序，再以 `windeployqt --release --compiler-runtime --no-translations` 部署 Qt 与 MSVC 运行库，并把实际链接的 OpenCV Release DLL 部署到程序同级目录。
+
+在 PowerShell 中运行（路径按本机 Qt/OpenCV 安装位置调整）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package_windows_release.ps1 `
+    -BuildDir build-release-package-x64 `
+    -QtBinDir C:\Qt\6.11.1\msvc2022_64\bin `
+    -OpenCvBinDir C:\Opencv\opencv\build\x64\vc16\bin `
+    -Clean
+```
+
+默认输出目录为 `dist\`：staging 目录为 `dist\video_call-win64\`，ZIP 名称为 `video_call-win64-release-<git-short-sha>.zip`。生成的 ZIP、DLL、EXE 和构建目录均为本机产物，不应提交到仓库。
+
+打包脚本会拒绝 Debug Qt/OpenCV DLL、PDB、构建缓存和非 x64 可执行文件；Debug DLL 与 Release DLL 不能混用。`--no-translations` 不影响本程序的中文界面，因为界面中文文本编译在程序与 `.ui` 文件中，而不是依赖 Qt 翻译包。
+
+最终 ZIP 必须在另一台未安装 Qt、OpenCV、Visual Studio、Conda 或 Python 的 Windows 11 电脑上解压验证，包括窗口与中文显示、摄像头、双向 UDP 视频、耳机双向音频、4∶3 画面和正常退出。

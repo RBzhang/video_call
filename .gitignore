@@ -83,3 +83,7 @@ __pycache__/
 .uic/
 /build*/
 /.qtcreator/
+
+# Windows portable-release artifacts
+/dist/
+*.zip

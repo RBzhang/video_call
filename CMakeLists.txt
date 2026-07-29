@@ -318,11 +318,9 @@ set_target_properties(video_call PROPERTIES
 )
 
 include(GNUInstallDirs)
-install(TARGETS video_call
-    BUNDLE DESTINATION .
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
+# Keep the install tree intentionally minimal: the packaging script adds only
+# runtime dependencies next to this executable.
+install(TARGETS video_call RUNTIME DESTINATION .)
 
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(video_call)
