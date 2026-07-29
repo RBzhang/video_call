@@ -365,6 +365,7 @@ void MainWindow::onStartVideoSendClicked()
     m_videoFramesSentInterval = 0;
     m_videoBytesSentInterval = 0;
     m_videoFragmentsSentInterval = 0;
+    m_videoEncodingDurationUsInterval = 0;
     m_lastJpegSize = 0;
     m_lastFragmentCount = 0;
     m_lastVideoWidth = 0;
@@ -372,6 +373,7 @@ void MainWindow::onStartVideoSendClicked()
 
     emit requestStartVideoEncoding(targetFps, jpegQuality);
     if (m_videoStatsTimer) {
+        m_videoStatsElapsedTimer.restart();
         m_videoStatsTimer->start();
     }
     ui->videoSendStatusLabel->setText(
@@ -509,7 +511,8 @@ void MainWindow::onFrameReady(const QImage &image)
 void MainWindow::onJpegFrameReady(const QByteArray &jpegData,
                                   int width,
                                   int height,
-                                  int jpegQuality)
+                                  int jpegQuality,
+                                  qint64 encodingDurationUs)
 {
     if (!m_videoSending) {
         return;
@@ -542,6 +545,9 @@ void MainWindow::onJpegFrameReady(const QByteArray &jpegData,
     ++m_videoFramesSentInterval;
     m_videoBytesSentInterval += static_cast<quint64>(jpegData.size());
     m_videoFragmentsSentInterval += static_cast<quint64>(fragmentCount);
+    if (encodingDurationUs > 0) {
+        m_videoEncodingDurationUsInterval += static_cast<quint64>(encodingDurationUs);
+    }
     m_lastJpegSize = jpegData.size();
     m_lastFragmentCount = fragmentCount;
     m_lastVideoWidth = width;
@@ -564,28 +570,48 @@ void MainWindow::updateVideoSendStatistics()
         return;
     }
 
+    const qint64 elapsedMs = m_videoStatsElapsedTimer.isValid()
+        ? m_videoStatsElapsedTimer.restart()
+        : 0;
+    if (elapsedMs <= 0) {
+        m_videoStatsElapsedTimer.restart();
+        return;
+    }
+
     if (m_videoFramesSentInterval == 0) {
-        ui->videoSendStatusLabel->setText(QStringLiteral("视频发送：等待 JPEG 帧……"));
+        ui->videoSendStatusLabel->setText(
+            QStringLiteral("视频发送：目标 %1 FPS，实际 0.0 FPS，等待 JPEG 帧……")
+                .arg(m_activeVideoFps));
+        m_videoBytesSentInterval = 0;
+        m_videoFragmentsSentInterval = 0;
+        m_videoEncodingDurationUsInterval = 0;
         return;
     }
 
     const double frames = static_cast<double>(m_videoFramesSentInterval);
+    const double actualFps = frames * 1000.0 / static_cast<double>(elapsedMs);
     const double averageJpegKilobytes = static_cast<double>(m_videoBytesSentInterval) / frames / 1024.0;
     const double payloadMegabitsPerSecond =
-        static_cast<double>(m_videoBytesSentInterval) * 8.0 / 1000000.0;
+        static_cast<double>(m_videoBytesSentInterval) * 8.0
+        / (static_cast<double>(elapsedMs) * 1000.0);
     const double averageFragments = static_cast<double>(m_videoFragmentsSentInterval) / frames;
+    const double averageEncodingMilliseconds =
+        static_cast<double>(m_videoEncodingDurationUsInterval) / frames / 1000.0;
     ui->videoSendStatusLabel->setText(
-        QStringLiteral("视频发送：%1×%2，%3 FPS，JPEG %4 KB/帧，%5 Mbit/s，%6 分片/帧")
+        QStringLiteral("视频发送：目标 %1 FPS，实际 %2 FPS，%3×%4，JPEG %5 KB/帧，%6 Mbit/s，%7 分片/帧，编码 %8 ms/帧")
+            .arg(m_activeVideoFps)
+            .arg(actualFps, 0, 'f', 1)
             .arg(m_lastVideoWidth)
             .arg(m_lastVideoHeight)
-            .arg(frames, 0, 'f', 1)
             .arg(averageJpegKilobytes, 0, 'f', 1)
             .arg(payloadMegabitsPerSecond, 0, 'f', 2)
-            .arg(averageFragments, 0, 'f', 1));
+            .arg(averageFragments, 0, 'f', 1)
+            .arg(averageEncodingMilliseconds, 0, 'f', 1));
 
     m_videoFramesSentInterval = 0;
     m_videoBytesSentInterval = 0;
     m_videoFragmentsSentInterval = 0;
+    m_videoEncodingDurationUsInterval = 0;
 }
 
 void MainWindow::updateVideoDisplay()
@@ -629,6 +655,8 @@ void MainWindow::stopVideoSending(const QString &reason)
     m_videoFramesSentInterval = 0;
     m_videoBytesSentInterval = 0;
     m_videoFragmentsSentInterval = 0;
+    m_videoEncodingDurationUsInterval = 0;
+    m_videoStatsElapsedTimer.invalidate();
 
     if (wasSending && !reason.isEmpty()) {
         ui->videoSendStatusLabel->setText(reason);

@@ -1,6 +1,7 @@
 #include "cameraworker.h"
 
 #include "jpegframeencoder.h"
+#include "videoframerateutils.h"
 
 #include <cmath>
 
@@ -178,19 +179,37 @@ void CameraWorker::startVideoEncoding(int targetFps, int jpegQuality)
         return;
     }
 
+    stopVideoEncoding();
+
+    if (!m_videoEncodeScheduleTimer) {
+        m_videoEncodeScheduleTimer = new QTimer(this);
+        m_videoEncodeScheduleTimer->setTimerType(Qt::PreciseTimer);
+        connect(m_videoEncodeScheduleTimer,
+                &QTimer::timeout,
+                this,
+                &CameraWorker::encodeLatestVideoFrame);
+    }
+
     m_videoTargetFps = targetFps;
     m_jpegQuality = jpegQuality;
-    m_videoFrameIntervalMs = qMax(1, 1000 / m_videoTargetFps);
+    m_videoFrameIntervalMs = VideoFrameRateUtils::intervalMilliseconds(m_videoTargetFps);
     m_videoEncodingEnabled = true;
-    m_videoEncodeTimer.invalidate();
+    m_encodeFirstFrameImmediately = true;
     m_videoEncodingErrorTimer.invalidate();
     m_lastVideoEncodingError.clear();
+    m_videoEncodeScheduleTimer->start(m_videoFrameIntervalMs);
 }
 
 void CameraWorker::stopVideoEncoding()
 {
     m_videoEncodingEnabled = false;
-    m_videoEncodeTimer.invalidate();
+    m_encodeFirstFrameImmediately = false;
+    if (m_videoEncodeScheduleTimer) {
+        m_videoEncodeScheduleTimer->stop();
+    }
+    m_latestBgrFrame.release();
+    m_latestFrameSerial = 0;
+    m_lastEncodedFrameSerial = 0;
     m_videoEncodingErrorTimer.invalidate();
     m_lastVideoEncodingError.clear();
 }
@@ -269,26 +288,51 @@ void CameraWorker::captureFrame()
 
     emit frameReady(image.copy());
 
-    const bool shouldEncode = m_videoEncodingEnabled
-        && (!m_videoEncodeTimer.isValid()
-            || m_videoEncodeTimer.elapsed() >= m_videoFrameIntervalMs);
-    if (!shouldEncode) {
+    if (!m_videoEncodingEnabled) {
         return;
     }
 
+    bgrFrame.copyTo(m_latestBgrFrame);
+    ++m_latestFrameSerial;
+    if (m_latestFrameSerial == 0) {
+        ++m_latestFrameSerial;
+    }
+
+    if (m_encodeFirstFrameImmediately) {
+        m_encodeFirstFrameImmediately = false;
+        encodeLatestVideoFrame();
+    }
+}
+
+void CameraWorker::encodeLatestVideoFrame()
+{
+    if (!m_videoEncodingEnabled || !m_running || !m_camera.isOpened()
+        || m_latestBgrFrame.empty() || m_latestFrameSerial == 0
+        || m_latestFrameSerial == m_lastEncodedFrameSerial) {
+        return;
+    }
+
+    const quint64 frameSerial = m_latestFrameSerial;
     QString encodingError;
+    QElapsedTimer encodingTimer;
+    encodingTimer.start();
     const QByteArray jpegData = JpegFrameEncoder::encodeBgrFrame(
-        bgrFrame, m_jpegQuality, &encodingError);
-    m_videoEncodeTimer.restart();
+        m_latestBgrFrame, m_jpegQuality, &encodingError);
+    const qint64 encodingDurationUs = encodingTimer.nsecsElapsed() / 1000;
 
     if (jpegData.isEmpty()) {
         reportVideoEncodingError(encodingError);
         return;
     }
 
+    m_lastEncodedFrameSerial = frameSerial;
     m_lastVideoEncodingError.clear();
     m_videoEncodingErrorTimer.invalidate();
-    emit jpegFrameReady(jpegData, bgrFrame.cols, bgrFrame.rows, m_jpegQuality);
+    emit jpegFrameReady(jpegData,
+                        m_latestBgrFrame.cols,
+                        m_latestBgrFrame.rows,
+                        m_jpegQuality,
+                        encodingDurationUs);
 }
 
 bool CameraWorker::tryOpenCamera(int cameraIndex,

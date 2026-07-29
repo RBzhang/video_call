@@ -47,6 +47,8 @@ set(PROJECT_SOURCES
         cameraworker.h
         jpegframeencoder.cpp
         jpegframeencoder.h
+        videoframerateutils.cpp
+        videoframerateutils.h
         videopacketprotocol.cpp
         videopacketprotocol.h
         videoframereassembler.cpp
@@ -172,6 +174,25 @@ if(BUILD_TESTING)
     add_test(
         NAME jpeg_frame_encoder_test
         COMMAND jpeg_frame_encoder_test
+    )
+
+    add_executable(video_frame_rate_utils_test
+        tests/videoframerateutils_test.cpp
+        videoframerateutils.cpp
+        videoframerateutils.h
+    )
+
+    target_link_libraries(video_frame_rate_utils_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+    )
+
+    target_include_directories(video_frame_rate_utils_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME video_frame_rate_utils_test
+        COMMAND video_frame_rate_utils_test
     )
 endif()
 

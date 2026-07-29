@@ -1,6 +1,6 @@
 # video_call
 
-基于 Qt Widgets 和 OpenCV 的 Windows 桌面视频通话项目。当前已完成本机摄像头预览，以及 UDP 视频帧的真实收发、分片与重组基础；暂未接入摄像头帧编码或远端图像显示。
+基于 Qt Widgets 和 OpenCV 的 Windows 桌面视频通话项目。当前已完成本机摄像头预览、摄像头 JPEG 的单向 UDP 发送，以及 UDP 视频帧的真实收发、分片与重组基础；暂未实现 Qt 端远端图像显示。
 
 ## 开发环境
 
@@ -24,7 +24,8 @@
 - 已定义 UDP 视频分片协议 V1，并实现了固定 32 字节网络字节序协议头、数据报序列化、解析和已编码帧分片。
 - `VideoFrameReassembler` 支持乱序分片、完全相同的重复分片、冲突重复分片丢弃、500 ms 未完成帧超时清理，以及 16 帧/16 MiB 接收缓存限制。
 - 摄像头帧可在 `CameraWorker` 专用线程使用 OpenCV `cv::imencode()` 编码为 JPEG，并按目标帧率交给现有 VCL1 UDP 发送器。
-- 已加入 CTest 协议、重组器、双端点真实 UDP 回环和 JPEG 编解码测试，覆盖单分片、多分片、最大负载、常见格式错误、乱序重组和 JPEG 边界标记与尺寸验证。
+- JPEG 发送使用独立的 `Qt::PreciseTimer` 调度，定时器与摄像头抓帧解耦；每次仅编码最新且尚未发送的新 BGR 帧，不会重复发送旧帧。
+- 已加入 CTest 协议、重组器、双端点真实 UDP 回环、JPEG 编解码和帧率区间计算测试，覆盖单分片、多分片、最大负载、常见格式错误、乱序重组、JPEG 边界标记与尺寸验证，以及 1–30 FPS 的调度区间。
 
 ## 明确尚未实现
 
@@ -108,13 +109,17 @@ OPENCV_VIDEOIO_DEBUG=1
 ctest --output-on-failure
 ```
 
-当前 CTest 包含三个独立控制台测试目标：
+当前 CTest 包含五个独立控制台测试目标：
 
 - `video_packet_protocol_test`：协议序列化、解析与分片。
 - `video_frame_reassembler_test`：乱序、重复、冲突、超时和缓存限制重组测试。
 - `video_udp_transport_test`：两个 `VideoUdpTransport` 端点使用系统分配端口进行真实 UDP 回环测试。
+- `jpeg_frame_encoder_test`：JPEG 编码与解码边界和尺寸验证。
+- `video_frame_rate_utils_test`：1–30 FPS 的毫秒区间计算，以及非法 FPS 拒绝。
 
 上述测试不依赖 Widgets 或 OpenCV。UDP 回环测试不固定占用 5000 或 5001 端口，测试完成后关闭两个 Socket。
+
+最近一次全新 Debug/x64 构建的 `ctest --output-on-failure` 为 `5/5` 通过；`udp_test_receiver.py` 和 `udp_jpeg_receiver.py` 均已通过 `py_compile` 与各自的 `--self-test`。
 
 ## 同机双实例测试
 
@@ -184,7 +189,7 @@ python tools/udp_test_receiver.py --bind 0.0.0.0 --port 5000 --once
 
 在“视频网络设置”区域完成 UDP 绑定、启动摄像头后，设置“发送帧率”和“JPEG 质量”，再点击“开始发送视频”。开始发送时会禁用确定性“发送测试帧”按钮和两个编码参数输入；停止发送后会恢复它们。停止连续发送不会停止本地预览或关闭 UDP。重新应用网络设置、停止网络、停止/报错摄像头、UDP 本地错误和关闭窗口都会停止连续发送。
 
-发送状态每秒显示实际成功提交给 `QUdpSocket::writeDatagram()` 的 JPEG payload 统计，例如实际 FPS、平均 JPEG KB/帧、JPEG payload Mbit/s 和平均分片数。该码率不包含 IP、UDP 或以太网开销；`writeDatagram()` 成功也不表示对端已收到。发送端不等待 ACK，也不检测对端是否在线。
+发送状态约每秒显示实际成功提交给 `QUdpSocket::writeDatagram()` 的 JPEG payload 统计：目标 FPS、按真实经过时间计算的实际 FPS、平均 JPEG KB/帧、JPEG payload Mbit/s、平均分片数和 JPEG 编码耗时。该码率不包含 IP、UDP 或以太网开销；`writeDatagram()` 成功也不表示对端已收到。发送端不等待 ACK，也不检测对端是否在线。
 
 ## Python JPEG 接收
 
@@ -234,6 +239,18 @@ Qt：
 
 依次应用网络设置、启动摄像头、开始发送视频。Python 应持续显示实时画面；停止发送后不应继续收到新 JPEG，本地摄像头预览仍继续。再次开始发送可恢复传输。两台电脑测试时，电脑 B 可监听 `0.0.0.0:5000`，电脑 A 的 Qt 对端 IP 填电脑 B 的局域网 IPv4；不同电脑都可使用本地端口 5000。Windows 可能要求允许 Python 使用专用网络，或手动放行对应 UDP 端口。
 
+### JPEG 发送节流实测
+
+使用全新 Debug/x64 构建目录 `build-pacing-clean-debug-x64`，本机 640×480、JPEG quality 60、DSHOW 摄像头和 `udp_jpeg_receiver.py --no-display`，每档连续发送至少 30 秒。Qt 和 Python 的 FPS 都按各自统计窗口内的实际经过时间计算。
+
+| 目标 FPS | Qt 实际 FPS | Python 实际 FPS | Qt JPEG KB/帧 | payload Mbit/s | 分片/帧 | Qt 编码 ms/帧 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 5 | 5.0 | 4.9 | 10.7 | 0.44 | 10.0 | 6.9 |
+| 10 | 9.9 | 9.9 | 12.0 | 0.97 | 11.0 | 6.9 |
+| 15 | 15.1 | 14.6 | 12.9 | 1.60 | 12.0 | 8.3 |
+
+三档均未出现 Python 重组超时、JPEG 解码失败或拒绝帧。停止 10 FPS 发送后，Python 已完成帧数在 3 秒观察窗口保持 `56` 不变；改为 15 FPS 并重新开始后，Qt 状态显示实际 `15.2 FPS`，接收完成帧数继续增长至 `136`。
+
 ## 摄像头后端诊断与退出行为
 
 摄像头打开是设备驱动调用，`cv::VideoCapture::open()` 对 Windows 的 DirectShow 和 Media Foundation 后端可能同步阻塞。OpenCV 的 `CAP_PROP_OPEN_TIMEOUT_MSEC` 只适用于 FFmpeg/GStreamer，不能用来可靠限制本机摄像头后端的打开时间。
@@ -242,6 +259,8 @@ Qt：
 
 调试输出会记录停止 `CameraWorker`、`stopCamera()` 完成、开始 `quit()`、`wait()` 返回、`CameraWorker` 析构和 `QThread` 删除的顺序，可用于核对退出阶段的对象生命周期。
 
+在上述全新 Debug 构建中，以下退出场景各连续执行 3 次：不启动摄像头或 UDP、仅绑定 UDP、摄像头预览后直接关闭、先停止摄像头再关闭、摄像头发送 JPEG 时直接关闭。15 次运行均在 0.82 秒内以退出码 0 结束，没有 `video_call.exe` 残留，也没有线程、定时器、Socket、OpenCV 或 Visual C++ Runtime 警告。
+
 ## 下一步
 
-将摄像头帧接入 JPEG 编码、远端图像解码显示，并在需要时设计音频和可靠性策略。
+实现 Qt 端 JPEG 解码和远端图像显示，并在需要时设计音频和可靠性策略。

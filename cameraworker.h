@@ -8,6 +8,7 @@
 #include <QString>
 #include <QTimer>
 
+#include <opencv2/core/mat.hpp>
 #include <opencv2/videoio.hpp>
 
 class CameraWorker : public QObject
@@ -27,7 +28,8 @@ signals:
     void jpegFrameReady(const QByteArray &jpegData,
                         int width,
                         int height,
-                        int jpegQuality);
+                        int jpegQuality,
+                        qint64 encodingDurationUs);
     void videoEncodingError(const QString &message);
 
 public slots:
@@ -38,6 +40,7 @@ public slots:
 
 private slots:
     void captureFrame();
+    void encodeLatestVideoFrame();
 
 private:
     bool tryOpenCamera(int cameraIndex,
@@ -51,6 +54,7 @@ private:
 
     cv::VideoCapture m_camera;
     QTimer *m_captureTimer = nullptr;
+    QTimer *m_videoEncodeScheduleTimer = nullptr;
     bool m_running = false;
     int m_cameraIndex = -1;
     int m_consecutiveReadFailures = 0;
@@ -63,7 +67,10 @@ private:
     int m_videoTargetFps = 10;
     int m_jpegQuality = 60;
     int m_videoFrameIntervalMs = 100;
-    QElapsedTimer m_videoEncodeTimer;
+    cv::Mat m_latestBgrFrame;
+    quint64 m_latestFrameSerial = 0;
+    quint64 m_lastEncodedFrameSerial = 0;
+    bool m_encodeFirstFrameImmediately = false;
     QElapsedTimer m_videoEncodingErrorTimer;
     QString m_lastVideoEncodingError;
 };

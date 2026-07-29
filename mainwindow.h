@@ -3,6 +3,7 @@
 
 #include <QHostAddress>
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QMainWindow>
 #include <QString>
@@ -61,7 +62,8 @@ private slots:
     void onJpegFrameReady(const QByteArray &jpegData,
                           int width,
                           int height,
-                          int jpegQuality);
+                          int jpegQuality,
+                          qint64 encodingDurationUs);
     void onVideoEncodingError(const QString &message);
     void updateVideoSendStatistics();
 
@@ -98,6 +100,7 @@ private:
     quint64 m_videoFramesSentInterval = 0;
     quint64 m_videoBytesSentInterval = 0;
     quint64 m_videoFragmentsSentInterval = 0;
+    quint64 m_videoEncodingDurationUsInterval = 0;
     qsizetype m_lastJpegSize = 0;
     qsizetype m_lastFragmentCount = 0;
     int m_lastVideoWidth = 0;
@@ -105,5 +108,6 @@ private:
     int m_activeVideoFps = 10;
     int m_activeJpegQuality = 60;
     QTimer *m_videoStatsTimer = nullptr;
+    QElapsedTimer m_videoStatsElapsedTimer;
 };
 #endif // MAINWINDOW_H
