@@ -17,12 +17,14 @@ class MainWindow;
 QT_END_NAMESPACE
 
 class CameraWorker;
+class AudioWorker;
 class QCloseEvent;
 class QResizeEvent;
 class QThread;
 class QTimer;
 class RemoteVideoDecoder;
 class VideoUdpTransport;
+struct AudioStatistics;
 
 class MainWindow : public QMainWindow
 {
@@ -37,6 +39,11 @@ signals:
     void requestStopCamera();
     void requestStartVideoEncoding(int targetFps, int jpegQuality);
     void requestStopVideoEncoding();
+    void requestConfigureAudioNetwork(const QString &peerAddress,
+                                      quint16 localPort,
+                                      quint16 peerPort);
+    void requestStartAudio();
+    void requestStopAudio();
     void requestRemoteJpegDecode(const QByteArray &jpegData,
                                  quint64 generation,
                                  quint32 sessionId,
@@ -57,6 +64,9 @@ private slots:
     void onSendTestFrameClicked();
     void onStartVideoSendClicked();
     void onStopVideoSendClicked();
+    void onApplyAudioSettingsClicked();
+    void onStartAudioClicked();
+    void onStopAudioClicked();
     void onUdpFrameReceived(const QByteArray &encodedFrame,
                             quint32 sessionId,
                             quint32 frameId,
@@ -96,6 +106,11 @@ private slots:
                                    const QString &senderAddress,
                                    quint16 senderPort);
     void updateRemoteReceiveStatistics();
+    void onAudioNetworkReady(const QString &message);
+    void onAudioStarted(const QString &message);
+    void onAudioStopped();
+    void onAudioError(const QString &message);
+    void onAudioStatisticsUpdated(const AudioStatistics &statistics);
 
 private:
     struct PendingRemoteJpegFrame
@@ -115,6 +130,7 @@ private:
     void resetCameraUi();
     void setLocalVideoStatus(const QString &message);
     void shutdownCameraThread();
+    void shutdownAudioThread();
     void shutdownRemoteDecoderThread();
     void stopVideoSending(const QString &reason);
     void updateVideoSendUi();
@@ -133,6 +149,8 @@ private:
     Ui::MainWindow *ui;
     CameraWorker *m_cameraWorker = nullptr;
     QThread *m_cameraThread = nullptr;
+    AudioWorker *m_audioWorker = nullptr;
+    QThread *m_audioThread = nullptr;
     RemoteVideoDecoder *m_remoteDecoder = nullptr;
     QThread *m_remoteDecoderThread = nullptr;
     VideoUdpTransport *m_videoUdpTransport = nullptr;
@@ -147,6 +165,8 @@ private:
     bool m_cameraOpening = false;
     bool m_shuttingDown = false;
     bool m_networkSettingsValid = false;
+    bool m_audioNetworkSettingsValid = false;
+    bool m_audioRunning = false;
 
     bool m_videoSending = false;
     quint64 m_videoFramesSentTotal = 0;

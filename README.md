@@ -1,6 +1,6 @@
 # video_call
 
-基于 Qt Widgets 和 OpenCV 的 Windows 桌面视频传输项目。当前已完成本机摄像头预览、JPEG/UDP 发送、VCL1 分片重组，以及 Qt 端远端 JPEG 解码显示；它尚不是包含音频和呼叫控制的完整视频通话系统。
+基于 Qt Widgets、OpenCV 和 Qt Multimedia 的 Windows 桌面音视频传输项目。当前已完成本机摄像头预览、JPEG/UDP 视频传输、ACL1 PCM 音频传输，以及 Qt 端远端 JPEG 解码显示；它不是完整的商用视频通话系统。
 
 ## 开发环境
 
@@ -9,6 +9,7 @@
 - MSVC x64，C++17
 - CMake
 - OpenCV 4.12.0（x64 / `vc16` 预编译包）
+- Qt Multimedia（Qt 6.11.1）
 
 ## 当前已完成
 
@@ -29,12 +30,18 @@
 - 解码调度始终最多保留“一帧处理中 + 一帧最新待处理”。解码较慢时旧 pending 帧会被新帧覆盖，避免无限 queued-signal 积压和旧画面延迟。
 - 远端接收独立于本地摄像头与本地发送；状态栏显示接收/显示 FPS、平均 JPEG 大小、JPEG payload 码率、解码耗时、覆盖帧、失败帧、外源帧和不支持帧。
 - 已加入 CTest 协议、重组器、双端点真实 UDP 回环、JPEG 编解码和帧率区间计算测试，覆盖单分片、多分片、最大负载、常见格式错误、乱序重组、JPEG 边界标记与尺寸验证，以及 1–30 FPS 的调度区间。
+- 已实现独立 ACL1 音频协议、独立 UDP Socket/端口、`AudioJitterBuffer` 和运行在专用 `QThread` 的 `AudioWorker`。麦克风采集、扬声器播放、定时播放和网络收发均不在 GUI 线程运行。
+- 音频固定为 16 kHz、单声道、Little Endian signed Int16 PCM；每 20 ms 发送一个 640-byte payload，不压缩、不分片。
+- 启动音频时严格检查默认输入和输出设备是否支持固定格式；不支持时不会隐式重采样或以不一致格式启动。
+- 关闭窗口会先在 AudioWorker 所在线程停止 Source/Sink、定时器和 UDP Socket，再 `quit()`、无超时 `wait()` 并删除 `QThread`。为避免 Qt Multimedia 的退出锁阻止最后窗口关闭，程序显式禁用了 quit lock；不使用 `QThread::terminate()`。
 
 ## 明确尚未实现
 
-- 音频
+- 音频压缩、Opus、AAC
+- AEC、降噪、自动增益、混音和音视频同步
+- 设备选择下拉框、呼叫控制和在线检测
 - ACK、丢包重传与前向纠错
-- TCP、GStreamer 与 FFmpeg API
+- TCP、GStreamer、FFmpeg API、WebRTC
 - H.264、加密、NAT 穿透和身份认证
 
 ## UDP 视频分片协议 V1
@@ -65,6 +72,42 @@
 | flags | 2 bytes |
 
 解析会拒绝错误魔数、错误版本、截断数据报、多余字节及不一致的分片长度。任一分片丢失时，接收端会在 500 ms 后丢弃未完成帧；当前不做重传。这是面向实时视频低延迟基础设计的取舍，不代表 UDP 可靠传输。
+
+## UDP PCM 音频（ACL1）
+
+音频不使用 VCL1，不占用视频 Socket，也不参与视频分片。`AudioUdpTransport` 使用独立 UDP Socket 和独立端口；默认本地、对端音频端口都是 `5002`。网络格式是固定的 16 kHz、单声道、signed Int16、Little Endian PCM：每包 20 ms、320 个采样、640-byte payload、每秒 50 包，PCM payload 码率为 `0.256 Mbit/s`。该格式没有编码器、音频分片或可变 payload。
+
+ACL1 的 32-byte 头始终按 Big Endian 网络字节序序列化；PCM payload 则保持 Little Endian signed Int16。完整数据报严格为 `672 bytes`，解析会拒绝截断、尾随字节、未知类型和任何固定字段不一致的数据报。
+
+| 字段 | 大小 | 固定值或含义 |
+| --- | ---: | --- |
+| magic | 4 bytes | `ACL1`（`0x41434C31`） |
+| version | 1 byte | `1` |
+| packetType | 1 byte | `1`（PCM） |
+| headerSize | 2 bytes | `32` |
+| sessionId | 4 bytes | 每次启动发送生成非零随机值 |
+| sequence | 4 bytes | 从 `1` 开始，回绕时跳过 `0` |
+| timestampSamples | 4 bytes | 每包增加 `320`，自然回绕 |
+| sampleRate | 4 bytes | `16000` |
+| channels | 2 bytes | `1` |
+| sampleFormat | 2 bytes | `1`（signed Int16） |
+| samplesPerChannel | 2 bytes | `320` |
+| payloadSize | 2 bytes | `640` |
+
+接收端使用纯逻辑 `AudioJitterBuffer`：三包预缓冲（60 ms）、最多十包（200 ms）、小范围乱序排序、重复包丢弃和迟到包丢弃。播放缺失包时写入严格的 640-byte 全零静音；连续缺失五包后退出播放状态并重新预缓冲。不会动态变速、拉伸或重采样。
+
+`AudioWorker` 位于独立 `QThread`，拥有 `AudioUdpTransport`、`QAudioSource`、`QAudioSink`、采集/播放 `QIODevice`、20 ms `Qt::PreciseTimer` 和 1 秒统计定时器。采集端把不规则 `readyRead()` 数据累积后按 640 bytes 切包，采集缓存上限为 6400 bytes；播放端正确处理部分写入，待写缓存最多五包。状态会显示实际发送/接收 packets/s、payload Mbit/s、抖动深度、静音补偿、重复/迟到/外源/无效包、输入/播放溢出和实际 Source/Sink bufferSize。
+
+点击“应用音频设置”时复用现有“对端 IP”输入框并验证 IPv4；成功绑定后才可以点击“开始双向音频”。启动时仅使用 `QMediaDevices` 的默认输入和输出，且两者都必须支持 16 kHz / 单声道 / Int16；不支持会显示设备描述及 preferred format，且不会启动或回退为其他网络格式。停止音频只停止音频，不停止摄像头、视频 UDP、视频编码或远端视频显示；重新应用音频设置会停止当前音频、清空抖动缓冲并重新绑定。
+
+同机双实例音频测试应使用交叉端口：
+
+| 实例 | 对端 IP | 本地音频端口 | 对端音频端口 |
+| --- | --- | ---: | ---: |
+| A | `127.0.0.1` | 5002 | 5003 |
+| B | `127.0.0.1` | 5003 | 5002 |
+
+两台电脑测试时，两边都使用本地/对端 `5002`，对端 IP 填另一台电脑的局域网 IPv4，并允许 Windows 防火墙的 UDP 入站访问。应使用耳机：当前没有 AEC，扬声器声音被麦克风再次采集导致的啸叫不是 UDP 故障。音频和视频的端口、Socket、来源过滤、线程和状态均相互独立；协议不检测对端在线、不发送 ACK、不重传、不做 FEC。
 
 ## 构建
 
@@ -110,18 +153,21 @@ OPENCV_VIDEOIO_DEBUG=1
 ctest --output-on-failure
 ```
 
-当前 CTest 包含六个独立控制台测试目标：
+当前 CTest 包含九个独立控制台测试目标：
 
 - `video_packet_protocol_test`：协议序列化、解析与分片。
 - `video_frame_reassembler_test`：乱序、重复、冲突、超时和缓存限制重组测试。
 - `video_udp_transport_test`：两个 `VideoUdpTransport` 端点使用系统分配端口进行真实 UDP 回环测试。
 - `jpeg_frame_encoder_test`：JPEG 编码与解码边界和尺寸验证。
 - `jpeg_frame_decoder_test`：确定性 JPEG 解码、灰度 JPEG、深拷贝，以及空输入、随机字节、截断、缺少 EOI 和超过 4 MiB 输入拒绝。
+- `audio_packet_protocol_test`：ACL1 固定头 Big Endian 序列化、严格解析和全部固定字段拒绝测试。
+- `audio_jitter_buffer_test`：三包预缓冲、乱序、重复、丢包静音、五包重缓冲、十包上限、session 重置和 sequence 回绕测试。
+- `audio_udp_transport_test`：两个 `AudioUdpTransport` 端点用系统分配端口进行双向、50 包连续、外源过滤、错误数据报和重新绑定测试。
 - `video_frame_rate_utils_test`：1–30 FPS 的毫秒区间计算，以及非法 FPS 拒绝。
 
-协议、重组器、UDP 回环和帧率工具测试不依赖 Qt Widgets；`video_udp_transport_test` 依赖 Qt Network；JPEG 编码和解码测试依赖 Qt Core/Gui 与 OpenCV。所有 CTest 都是无交互控制台测试，不需要显示 GUI 窗口。UDP 回环测试不固定占用 5000 或 5001 端口，测试完成后关闭两个 Socket。
+协议、重组器、UDP 回环和帧率工具测试不依赖 Qt Widgets；视频/音频 UDP 回环测试依赖 Qt Network；JPEG 编码和解码测试依赖 Qt Core/Gui 与 OpenCV。所有 CTest 都是无交互控制台测试，不需要显示 GUI 窗口。UDP 回环测试使用系统分配端口，不固定占用 5000、5001、5002 或 5003，测试完成后关闭 Socket。
 
-最近一次全新 Debug/x64 构建的 `ctest --output-on-failure` 为 `6/6` 通过。`udp_test_receiver.py` 只需要 Python 标准库；`udp_jpeg_receiver.py --self-test` 需要安装 Python OpenCV（`cv2`）。
+最近一次全新 Debug/x64 构建的 `ctest --output-on-failure` 为 `9/9` 通过。`udp_test_receiver.py` 只需要 Python 标准库；`udp_jpeg_receiver.py --self-test` 需要安装 Python OpenCV（`cv2`）。
 
 ## 同机双实例测试
 
@@ -279,8 +325,10 @@ Qt：
 
 关闭时还会先关闭 UDP、递增远端接收 generation、清空 pending JPEG 并停止远端统计，然后让 `RemoteVideoDecoder` 线程退出并 `wait()` 成功后删除其 `QThread`。正在进行的一次 `cv::imdecode()` 可以自然完成，但其旧 generation 结果不会再显示。调试输出会记录摄像头 Worker 和远端 JPEG 解码线程的停止、`quit()`、`wait()` 与对象析构顺序，可用于核对退出阶段的对象生命周期。
 
+音频关闭同样不会遗留后台线程：GUI 线程确认自己不在 AudioWorker 线程后，用 `Qt::BlockingQueuedConnection` 调用 `AudioWorker::shutdown()`；该槽会停止并在线程内删除 `QAudioSource`/`QAudioSink`、播放和统计定时器、关闭独立音频 UDP Socket 并清空缓存。随后在音频线程调用 `quit()`，GUI 线程无超时 `wait()`，确认结束后才删除 `QThread`；不会使用 `terminate()`、detach 或手动删除 AudioWorker。`main.cpp` 先在 GUI 线程初始化 Qt Multimedia 的默认设备后端，并显式禁用 quit lock，避免后端定时器跨线程析构或退出锁阻止最后窗口关闭。
+
 在全新 Debug/x64 构建中，应覆盖以下退出场景：未启动摄像头/UDP、仅绑定 UDP、摄像头运行、摄像头已停止、JPEG 发送、JPEG 接收解码，以及发送与接收同时进行。每次均应在 2 秒内以 exit code 0 结束，且没有 `video_call.exe` 残留、Visual C++ Runtime、QThread、QTimer、Socket 或 OpenCV 警告。
 
 ## 下一步
 
-在保持无 ACK、无重传的低延迟 UDP 边界前提下，按需求设计音频、呼叫控制和可靠性策略。
+在保持无 ACK、无重传的低延迟 UDP 边界前提下，按需求设计音频压缩、回声处理、呼叫控制或可靠性策略。

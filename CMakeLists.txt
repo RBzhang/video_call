@@ -13,11 +13,13 @@ find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS
     Gui
     Widgets
     Network
+    Multimedia
 )
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS
     Gui
     Widgets
     Network
+    Multimedia
 )
 
 if(NOT DEFINED OpenCV_DIR)
@@ -51,6 +53,14 @@ set(PROJECT_SOURCES
         jpegframeencoder.h
         jpegframedecoder.cpp
         jpegframedecoder.h
+        audiopacketprotocol.cpp
+        audiopacketprotocol.h
+        audiojitterbuffer.cpp
+        audiojitterbuffer.h
+        audioudptransport.cpp
+        audioudptransport.h
+        audioworker.cpp
+        audioworker.h
         remotevideodecoder.cpp
         remotevideodecoder.h
         videoframerateutils.cpp
@@ -91,6 +101,7 @@ target_link_libraries(video_call PRIVATE
     Qt${QT_VERSION_MAJOR}::Gui
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Multimedia
     ${OpenCV_LIBS}
 )
 
@@ -207,6 +218,67 @@ if(BUILD_TESTING)
     add_test(
         NAME jpeg_frame_decoder_test
         COMMAND jpeg_frame_decoder_test
+    )
+
+    add_executable(audio_packet_protocol_test
+        tests/audiopacketprotocol_test.cpp
+        audiopacketprotocol.cpp
+        audiopacketprotocol.h
+    )
+
+    target_link_libraries(audio_packet_protocol_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+    )
+
+    target_include_directories(audio_packet_protocol_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME audio_packet_protocol_test
+        COMMAND audio_packet_protocol_test
+    )
+
+    add_executable(audio_jitter_buffer_test
+        tests/audiojitterbuffer_test.cpp
+        audiojitterbuffer.cpp
+        audiojitterbuffer.h
+        audiopacketprotocol.h
+    )
+
+    target_link_libraries(audio_jitter_buffer_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+    )
+
+    target_include_directories(audio_jitter_buffer_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME audio_jitter_buffer_test
+        COMMAND audio_jitter_buffer_test
+    )
+
+    add_executable(audio_udp_transport_test
+        tests/audioudptransport_test.cpp
+        audioudptransport.cpp
+        audioudptransport.h
+        audiopacketprotocol.cpp
+        audiopacketprotocol.h
+    )
+
+    target_link_libraries(audio_udp_transport_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+        Qt${QT_VERSION_MAJOR}::Network
+    )
+
+    target_include_directories(audio_udp_transport_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME audio_udp_transport_test
+        COMMAND audio_udp_transport_test
     )
 
     add_executable(video_frame_rate_utils_test

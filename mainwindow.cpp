@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "audioworker.h"
 #include "cameraworker.h"
 #include "remotevideodecoder.h"
 #include "videopacketprotocol.h"
@@ -116,6 +117,61 @@ MainWindow::MainWindow(QWidget *parent)
             Qt::QueuedConnection);
     m_remoteDecoderThread->start();
 
+    qRegisterMetaType<AudioStatistics>("AudioStatistics");
+    m_audioThread = new QThread;
+    m_audioWorker = new AudioWorker;
+    m_audioWorker->moveToThread(m_audioThread);
+
+    connect(m_audioThread,
+            &QThread::finished,
+            m_audioWorker,
+            &QObject::deleteLater);
+    connect(m_audioWorker,
+            &QObject::destroyed,
+            this,
+            [this] { m_audioWorker = nullptr; });
+    connect(this,
+            &MainWindow::requestConfigureAudioNetwork,
+            m_audioWorker,
+            &AudioWorker::configureNetwork,
+            Qt::QueuedConnection);
+    connect(this,
+            &MainWindow::requestStartAudio,
+            m_audioWorker,
+            &AudioWorker::startAudio,
+            Qt::QueuedConnection);
+    connect(this,
+            &MainWindow::requestStopAudio,
+            m_audioWorker,
+            &AudioWorker::stopAudio,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::audioNetworkReady,
+            this,
+            &MainWindow::onAudioNetworkReady,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::audioStarted,
+            this,
+            &MainWindow::onAudioStarted,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::audioStopped,
+            this,
+            &MainWindow::onAudioStopped,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::audioError,
+            this,
+            &MainWindow::onAudioError,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::audioStatisticsUpdated,
+            this,
+            &MainWindow::onAudioStatisticsUpdated,
+            Qt::QueuedConnection);
+    m_audioThread->start();
+
     m_cameraThread = new QThread;
     m_cameraWorker = new CameraWorker;
     m_cameraWorker->moveToThread(m_cameraThread);
@@ -214,6 +270,18 @@ MainWindow::MainWindow(QWidget *parent)
             &QPushButton::clicked,
             this,
             &MainWindow::onStopVideoSendClicked);
+    connect(ui->applyAudioSettingsButton,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::onApplyAudioSettingsClicked);
+    connect(ui->startAudioButton,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::onStartAudioClicked);
+    connect(ui->stopAudioButton,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::onStopAudioClicked);
 
     resetCameraUi();
     updateVideoSendUi();
@@ -227,6 +295,7 @@ MainWindow::~MainWindow()
         m_videoUdpTransport->close();
     }
     resetRemoteReceiveState(QStringLiteral("远端接收：网络已停止"));
+    shutdownAudioThread();
     shutdownRemoteDecoderThread();
     shutdownCameraThread();
     delete ui;
@@ -239,6 +308,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         m_videoUdpTransport->close();
     }
     resetRemoteReceiveState(QStringLiteral("远端接收：网络已停止"));
+    shutdownAudioThread();
     shutdownRemoteDecoderThread();
     shutdownCameraThread();
     QMainWindow::closeEvent(event);
@@ -457,6 +527,153 @@ void MainWindow::onStartVideoSendClicked()
 void MainWindow::onStopVideoSendClicked()
 {
     stopVideoSending(QStringLiteral("视频发送：已停止。"));
+}
+
+void MainWindow::onApplyAudioSettingsClicked()
+{
+    if (m_shuttingDown) {
+        return;
+    }
+
+    const QString peerAddress = ui->peerAddressLineEdit->text().trimmed();
+    QHostAddress parsedAddress;
+    const bool validIpv4 = parsedAddress.setAddress(peerAddress)
+        && parsedAddress.protocol() == QAbstractSocket::IPv4Protocol;
+    if (!validIpv4) {
+        m_audioNetworkSettingsValid = false;
+        m_audioRunning = false;
+        ui->startAudioButton->setEnabled(false);
+        ui->stopAudioButton->setEnabled(false);
+        ui->audioStatusLabel->setText(QStringLiteral("音频：对端 IPv4 地址无效"));
+        return;
+    }
+    if (!m_audioWorker || !m_audioThread || !m_audioThread->isRunning()) {
+        m_audioNetworkSettingsValid = false;
+        m_audioRunning = false;
+        ui->startAudioButton->setEnabled(false);
+        ui->stopAudioButton->setEnabled(false);
+        ui->audioStatusLabel->setText(QStringLiteral("音频：工作线程不可用。"));
+        return;
+    }
+
+    m_audioNetworkSettingsValid = false;
+    m_audioRunning = false;
+    ui->startAudioButton->setEnabled(false);
+    ui->stopAudioButton->setEnabled(false);
+    ui->audioStatusLabel->setText(QStringLiteral("音频：正在配置网络……"));
+    emit requestConfigureAudioNetwork(peerAddress,
+                                      static_cast<quint16>(ui->localAudioPortSpinBox->value()),
+                                      static_cast<quint16>(ui->peerAudioPortSpinBox->value()));
+}
+
+void MainWindow::onStartAudioClicked()
+{
+    if (m_shuttingDown || m_audioRunning) {
+        return;
+    }
+    if (!m_audioNetworkSettingsValid || !m_audioWorker || !m_audioThread
+        || !m_audioThread->isRunning()) {
+        ui->audioStatusLabel->setText(QStringLiteral("音频：请先完成有效的音频网络配置。"));
+        return;
+    }
+
+    ui->startAudioButton->setEnabled(false);
+    ui->stopAudioButton->setEnabled(false);
+    ui->audioStatusLabel->setText(QStringLiteral("音频：正在启动默认输入和输出设备……"));
+    emit requestStartAudio();
+}
+
+void MainWindow::onStopAudioClicked()
+{
+    if (m_shuttingDown || !m_audioWorker || !m_audioThread || !m_audioThread->isRunning()) {
+        return;
+    }
+
+    ui->startAudioButton->setEnabled(false);
+    ui->stopAudioButton->setEnabled(false);
+    ui->audioStatusLabel->setText(QStringLiteral("音频：正在停止……"));
+    emit requestStopAudio();
+}
+
+void MainWindow::onAudioNetworkReady(const QString &message)
+{
+    if (m_shuttingDown) {
+        return;
+    }
+
+    m_audioNetworkSettingsValid = true;
+    m_audioRunning = false;
+    ui->startAudioButton->setEnabled(true);
+    ui->stopAudioButton->setEnabled(false);
+    ui->audioStatusLabel->setText(message);
+}
+
+void MainWindow::onAudioStarted(const QString &message)
+{
+    if (m_shuttingDown) {
+        return;
+    }
+
+    m_audioRunning = true;
+    ui->startAudioButton->setEnabled(false);
+    ui->stopAudioButton->setEnabled(true);
+    ui->audioStatusLabel->setText(message);
+}
+
+void MainWindow::onAudioStopped()
+{
+    m_audioRunning = false;
+    if (m_shuttingDown) {
+        return;
+    }
+
+    ui->startAudioButton->setEnabled(m_audioNetworkSettingsValid);
+    ui->stopAudioButton->setEnabled(false);
+    ui->audioStatusLabel->setText(QStringLiteral("音频：已停止（网络保持绑定）"));
+}
+
+void MainWindow::onAudioError(const QString &message)
+{
+    m_audioRunning = false;
+    if (m_shuttingDown) {
+        return;
+    }
+
+    ui->startAudioButton->setEnabled(m_audioNetworkSettingsValid);
+    ui->stopAudioButton->setEnabled(false);
+    ui->audioStatusLabel->setText(QStringLiteral("音频：%1").arg(message));
+}
+
+void MainWindow::onAudioStatisticsUpdated(const AudioStatistics &statistics)
+{
+    if (m_shuttingDown || !m_audioRunning) {
+        return;
+    }
+
+    ui->audioStatusLabel->setText(
+        QStringLiteral("音频：发送 %1 包/s（%2 Mbit/s），接收 %3 包/s（%4 Mbit/s），抖动 %5 包/%6 ms，静音补偿 %7，重复 %8，迟到 %9，外源 %10，无效 %11，采集溢出 %12，播放溢出 %13，输入缓冲 %14 bytes，输出缓冲 %15 bytes\n输入：%16｜输出：%17")
+            .arg(statistics.sentPacketsPerSecond, 0, 'f', 1)
+            .arg(statistics.sentPayloadMegabitsPerSecond, 0, 'f', 3)
+            .arg(statistics.receivedPacketsPerSecond, 0, 'f', 1)
+            .arg(statistics.receivedPayloadMegabitsPerSecond, 0, 'f', 3)
+            .arg(statistics.jitterBufferedPackets)
+            .arg(statistics.jitterBufferedMilliseconds)
+            .arg(statistics.concealedPackets)
+            .arg(statistics.duplicatePackets)
+            .arg(statistics.latePackets)
+            .arg(statistics.foreignPackets)
+            .arg(statistics.invalidPackets)
+            .arg(statistics.captureOverruns)
+            .arg(statistics.playbackOverruns)
+            .arg(statistics.sourceBufferSize)
+            .arg(statistics.sinkBufferSize)
+            .arg(statistics.inputDeviceDescription, statistics.outputDeviceDescription));
+    ui->audioStatusLabel->setToolTip(
+        QStringLiteral("输入：%1（Source bufferSize=%2）\n输出：%3（Sink bufferSize=%4）")
+            .arg(statistics.inputDeviceDescription)
+            .arg(statistics.sourceBufferSize)
+            .arg(statistics.outputDeviceDescription)
+            .arg(statistics.sinkBufferSize));
 }
 
 void MainWindow::onUdpFrameReceived(const QByteArray &encodedFrame,
@@ -1127,6 +1344,71 @@ bool MainWindow::validateDeterministicTestFrame(const QByteArray &frame,
     }
     clearTestFrameError(errorMessage);
     return true;
+}
+
+void MainWindow::shutdownAudioThread()
+{
+    QThread *audioThread = m_audioThread;
+    if (!audioThread) {
+        return;
+    }
+
+    const bool calledFromAudioThread = QThread::currentThread() == audioThread;
+    Q_ASSERT(!calledFromAudioThread);
+    if (calledFromAudioThread) {
+        qCritical().noquote()
+            << QStringLiteral("[MainWindow] 禁止在音频线程中等待自身退出。");
+        return;
+    }
+
+    m_audioRunning = false;
+    m_audioNetworkSettingsValid = false;
+    if (m_audioWorker) {
+        disconnect(m_audioWorker, nullptr, this, nullptr);
+    }
+
+    if (audioThread->isRunning() && m_audioWorker) {
+        qInfo().noquote() << QStringLiteral("[MainWindow] 开始停止 AudioWorker。");
+        const bool shutdownInvoked = QMetaObject::invokeMethod(
+            m_audioWorker,
+            &AudioWorker::shutdown,
+            Qt::BlockingQueuedConnection);
+        if (!shutdownInvoked) {
+            qCritical().noquote() << QStringLiteral("[MainWindow] AudioWorker::shutdown 调用未投递。");
+            return;
+        }
+        qInfo().noquote() << QStringLiteral("[MainWindow] AudioWorker::shutdown 完成。");
+
+        qInfo().noquote() << QStringLiteral("[MainWindow] 开始 quit 音频线程。");
+        const bool quitInvoked = QMetaObject::invokeMethod(
+            m_audioWorker,
+            [] { QThread::currentThread()->quit(); },
+            Qt::BlockingQueuedConnection);
+        if (!quitInvoked) {
+            qCritical().noquote()
+                << QStringLiteral("[MainWindow] 音频 QThread::quit() 调用未投递。");
+            return;
+        }
+    } else if (audioThread->isRunning()) {
+        qWarning().noquote()
+            << QStringLiteral("[MainWindow] AudioWorker 已销毁，直接 quit 音频线程。");
+        audioThread->quit();
+    }
+
+    const bool waitSucceeded = audioThread->wait();
+    qInfo().noquote()
+        << QStringLiteral("[MainWindow] 音频线程 wait 返回：") << waitSucceeded;
+    Q_ASSERT(waitSucceeded);
+    if (!waitSucceeded) {
+        qCritical().noquote()
+            << QStringLiteral("[MainWindow] 音频线程未结束，拒绝删除 QThread。");
+        return;
+    }
+
+    m_audioWorker = nullptr;
+    m_audioThread = nullptr;
+    qInfo().noquote() << QStringLiteral("[MainWindow] 删除音频 QThread。");
+    delete audioThread;
 }
 
 void MainWindow::shutdownRemoteDecoderThread()
