@@ -6,6 +6,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QMainWindow>
+#include <QPointer>
 #include <QString>
 
 #include <optional>
@@ -55,6 +56,7 @@ signals:
                                  quint32 timestampMs,
                                  const QString &senderAddress,
                                  quint16 senderPort);
+    void shutdownCompleted(bool workersDestroyed);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -144,6 +146,7 @@ private:
     void shutdownCameraThread();
     void shutdownAudioThread();
     void shutdownRemoteDecoderThread();
+    void shutdownAll();
     void stopVideoSending(const QString &reason);
     void updateVideoSendUi();
     void scheduleRemoteJpegDecode(PendingRemoteJpegFrame frame);
@@ -160,11 +163,11 @@ private:
                                         QString *errorMessage) const;
 
     Ui::MainWindow *ui;
-    CameraWorker *m_cameraWorker = nullptr;
+    QPointer<CameraWorker> m_cameraWorker;
     QThread *m_cameraThread = nullptr;
-    AudioWorker *m_audioWorker = nullptr;
+    QPointer<AudioWorker> m_audioWorker;
     QThread *m_audioThread = nullptr;
-    RemoteVideoDecoder *m_remoteDecoder = nullptr;
+    QPointer<RemoteVideoDecoder> m_remoteDecoder;
     QThread *m_remoteDecoderThread = nullptr;
     VideoUdpTransport *m_videoUdpTransport = nullptr;
     QImage m_lastFrame;
@@ -177,6 +180,7 @@ private:
     bool m_cameraRunning = false;
     bool m_cameraOpening = false;
     bool m_shuttingDown = false;
+    bool m_shutdownCompleted = false;
     bool m_networkSettingsValid = false;
     bool m_audioNetworkSettingsValid = false;
     bool m_audioRunning = false;

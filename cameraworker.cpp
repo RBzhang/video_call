@@ -7,8 +7,11 @@
 
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QThread>
 
 #include <opencv2/imgproc.hpp>
+
+#include <atomic>
 
 namespace {
 
@@ -26,6 +29,8 @@ QString backendDisplayName(int backend)
     }
 }
 
+std::atomic_int g_cameraWorkerDestructionCount{0};
+
 } // namespace
 
 CameraWorker::CameraWorker(QObject *parent)
@@ -35,15 +40,23 @@ CameraWorker::CameraWorker(QObject *parent)
 
 CameraWorker::~CameraWorker()
 {
-    qInfo().noquote() << QStringLiteral("[CameraWorker] 析构。");
+    shutdown();
+    const int destructionCount = ++g_cameraWorkerDestructionCount;
+    qInfo().nospace() << "[CameraWorker] destroyed #" << destructionCount
+                      << " this=" << static_cast<const void *>(this)
+                      << " currentThreadId=" << QThread::currentThreadId()
+                      << " objectThread=" << thread()
+                      << " objectThreadRunning=" << (thread() && thread()->isRunning());
+}
 
-    stopVideoEncoding();
+int CameraWorker::destructionCount()
+{
+    return g_cameraWorkerDestructionCount.load();
+}
 
-    if (m_captureTimer && m_captureTimer->isActive()) {
-        m_captureTimer->stop();
-    }
-
-    releaseCamera();
+void CameraWorker::resetDestructionCount()
+{
+    g_cameraWorkerDestructionCount.store(0);
 }
 
 void CameraWorker::startCamera(int cameraIndex)
@@ -212,6 +225,22 @@ void CameraWorker::stopVideoEncoding()
     m_lastEncodedFrameSerial = 0;
     m_videoEncodingErrorTimer.invalidate();
     m_lastVideoEncodingError.clear();
+}
+
+void CameraWorker::shutdown()
+{
+    stopVideoEncoding();
+    if (m_captureTimer) {
+        m_captureTimer->stop();
+    }
+    releaseCamera();
+    m_running = false;
+    m_cameraIndex = -1;
+    m_consecutiveReadFailures = 0;
+    m_frameWidth = 0;
+    m_frameHeight = 0;
+    m_reportedFps = 0.0;
+    m_backendDescription.clear();
 }
 
 void CameraWorker::captureFrame()

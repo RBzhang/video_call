@@ -115,6 +115,20 @@ ACL1 的 32-byte 头始终按 Big Endian 网络字节序序列化；PCM payload 
 
 修改 `QObject` 派生类的成员后，建议重新运行 CMake 并执行一次全量构建，避免复用旧的目标文件或自动生成文件。
 
+### Windows Debug 退出崩溃：必须干净重建的情形
+
+本项目的 `MainWindow`、Camera/Audio Worker 和远端解码器均是跨线程对象；修改了这类 `QObject` 派生类的成员布局后，不能继续信任曾经部分构建失败或中断的 build 目录。曾复现过旧的 `main.cpp.obj` 按旧 `MainWindow` 大小在栈上创建对象、而新的构造函数按更大的布局写入成员的情况。最先出现的是 MSVC `/RTC1` 的“`w` 周围的栈已损坏”，随后才可能在关闭时表现为 Debug Heap 的 `_CrtIsValidHeapPointer(block)` 断言；这不是应通过 Release、`exit()` 或关闭断言规避的 CRT 问题。
+
+如果遇到上述两种错误，关闭 Qt Creator 和程序，**删除该 Kit 对应的旧 build 配置目录后重新配置 CMake**，再进行完整构建。例如：
+
+```powershell
+C:\Qt\Tools\CMake_64\bin\cmake.exe -S . -B build\debug-clean -DOpenCV_DIR=C:\Opencv\opencv\build\x64\vc16\lib
+C:\Qt\Tools\CMake_64\bin\cmake.exe --build build\debug-clean --config Debug
+C:\Qt\Tools\CMake_64\bin\ctest.exe --test-dir build\debug-clean -C Debug --output-on-failure
+```
+
+之后应从这个新目录启动程序。正常的小改动并不要求删除所有 build 目录；这里的要求仅针对类布局变更、构建中断，或已经出现栈/堆损坏诊断的配置目录。
+
 项目在未由外部指定时使用以下 OpenCV CMake 配置目录：
 
 ```text
@@ -129,13 +143,9 @@ C:/Opencv/opencv/build/x64/vc16/lib
 
 ## 运行时 DLL
 
-实际调用 OpenCV 后，运行环境需要能够找到其 DLL 目录：
+配置阶段会检查 `opencv_core`、`opencv_imgcodecs`、`opencv_imgproc` 和 `opencv_videoio` 导入目标是否同时提供 Debug/Release 的导入库和 DLL；缺少任一配置会直接报错。`video_call` 的构建后步骤会把**当前配置实际链接**的 Qt Core/Gui/Widgets/Network/Multimedia、OpenCV DLL 以及 Windows 平台插件复制到可执行文件目录：Debug 为 `Qt6*Cored.dll`/`opencv_*d.dll` 和 `platforms/qwindowsd.dll`，Release 为不带 `d` 后缀的对应文件和 `platforms/qwindows.dll`。因此 Qt Creator 可以直接运行该目录下的程序，不应依赖 `PATH` 恰好指向另一套 Qt 或 OpenCV。
 
-```text
-C:\Opencv\opencv\build\x64\vc16\bin
-```
-
-可在 Qt Creator 的 Run Environment 中将其加入 `PATH`，或在后续添加 CMake 的部署/复制规则。该仓库不会提交 `build` 等生成目录或编译产物。
+MSVC 目标显式使用动态运行库：Debug 为 `/MDd`，Release 为 `/MD`。不要把 Debug 可执行文件与 Release OpenCV/Qt DLL 混用，反之亦然。该仓库不会提交 `build` 等生成目录或编译产物。
 
 若需要 OpenCV 更详细的内部 videoio 日志，可仅在调试运行环境中增加：
 
@@ -153,7 +163,7 @@ OPENCV_VIDEOIO_DEBUG=1
 ctest --output-on-failure
 ```
 
-当前 CTest 包含九个独立控制台测试目标：
+当前 CTest 包含十个测试目标：
 
 - `video_packet_protocol_test`：协议序列化、解析与分片。
 - `video_frame_reassembler_test`：乱序、重复、冲突、超时和缓存限制重组测试。
@@ -164,10 +174,19 @@ ctest --output-on-failure
 - `audio_jitter_buffer_test`：三包预缓冲、乱序、重复、丢包静音、五包重缓冲、十包上限、session 重置和 sequence 回绕测试。
 - `audio_udp_transport_test`：两个 `AudioUdpTransport` 端点用系统分配端口进行双向、50 包连续、外源过滤、错误数据报和重新绑定测试。
 - `video_frame_rate_utils_test`：1–30 FPS 的毫秒区间计算，以及非法 FPS 拒绝。
+- `mainwindow_exit_smoke_test`：创建 `QApplication`/`MainWindow` 后自动关闭；无硬件时至少连续三次覆盖启动即退出和 UDP 配置即退出，有可用设备时继续覆盖摄像头、视频发送、音频和摄像头重启。它检查每个 worker 只析构一次，且没有 `QThread: Destroyed while thread is still running`。
 
 协议、重组器、UDP 回环和帧率工具测试不依赖 Qt Widgets；视频/音频 UDP 回环测试依赖 Qt Network；JPEG 编码和解码测试依赖 Qt Core/Gui 与 OpenCV。所有 CTest 都是无交互控制台测试，不需要显示 GUI 窗口。UDP 回环测试使用系统分配端口，不固定占用 5000、5001、5002 或 5003，测试完成后关闭 Socket。
 
-最近一次全新 Debug/x64 构建的 `ctest --output-on-failure` 为 `9/9` 通过。`udp_test_receiver.py` 只需要 Python 标准库；`udp_jpeg_receiver.py --self-test` 需要安装 Python OpenCV（`cv2`）。
+最近一次全新 Debug/x64、Release/x64 和 MSVC AddressSanitizer Debug 构建的 `ctest --output-on-failure` 均为 `10/10` 通过。AddressSanitizer 可用独立目录启用：
+
+```powershell
+C:\Qt\Tools\CMake_64\bin\cmake.exe -S . -B build\asan-clean -DVIDEO_CALL_ENABLE_ASAN=ON -DOpenCV_DIR=C:\Opencv\opencv\build\x64\vc16\lib
+C:\Qt\Tools\CMake_64\bin\cmake.exe --build build\asan-clean --config Debug
+C:\Qt\Tools\CMake_64\bin\ctest.exe --test-dir build\asan-clean -C Debug --output-on-failure
+```
+
+该选项在 MSVC 下启用 `/fsanitize=address`、`/Zi` 和 `/INCREMENTAL:NO`，并移除与 ASan 不兼容的 `/RTC1`/`/ZI`。`udp_test_receiver.py` 只需要 Python 标准库；`udp_jpeg_receiver.py --self-test` 需要安装 Python OpenCV（`cv2`）。
 
 ## 同机双实例测试
 
@@ -365,13 +384,11 @@ Qt：
 
 摄像头打开是设备驱动调用，`cv::VideoCapture::open()` 对 Windows 的 DirectShow 和 Media Foundation 后端可能同步阻塞。OpenCV 的 `CAP_PROP_OPEN_TIMEOUT_MSEC` 只适用于 FFmpeg/GStreamer，不能用来可靠限制本机摄像头后端的打开时间。
 
-关闭主窗口时，GUI 线程会确认自己不是摄像头线程，再以 `Qt::BlockingQueuedConnection` 在 `CameraWorker` 所在线程同步调用 `stopCamera()`。该调用会停止 `QTimer`、释放 `cv::VideoCapture`，随后在摄像头线程调用 `QThread::quit()`，并由 GUI 线程无超时地 `QThread::wait()`。仅在 `wait()` 确认工作线程结束后才删除 `QThread`；不会让摄像头线程在 `QApplication` 退出后继续运行，也不会手动删除 `CameraWorker`。
+`MainWindow::shutdownAll()` 是唯一的幂等退出入口：`closeEvent()` 调用它一次，析构函数只在尚未关闭时兜底。它一开始就设置关闭标志、停止 GUI 定时器并禁止新任务，断开跨线程连接、关闭 GUI 线程的 UDP transport；然后以 `Qt::BlockingQueuedConnection` 在各 worker 自己的线程内执行 `shutdown()`，再 `quit()`、`wait()`，最后才删除已停止的 `QThread`。worker 仍由 `QThread::finished -> QObject::deleteLater` 销毁，GUI 线程绝不手工删除 worker；`QPointer` 防止结束阶段继续访问悬空 worker。
 
-关闭时还会先关闭 UDP、递增远端接收 generation、清空 pending JPEG 并停止远端统计，然后让 `RemoteVideoDecoder` 线程退出并 `wait()` 成功后删除其 `QThread`。正在进行的一次 `cv::imdecode()` 可以自然完成，但其旧 generation 结果不会再显示。调试输出会记录摄像头 Worker 和远端 JPEG 解码线程的停止、`quit()`、`wait()` 与对象析构顺序，可用于核对退出阶段的对象生命周期。
+摄像头关闭会在 `CameraWorker` 线程中停止 `QTimer`、释放 `cv::VideoCapture` 和帧缓存。音频关闭会在 `AudioWorker` 线程中停止 `QAudioSource`/`QAudioSink`、I/O 设备、定时器和 UDP transport；带有 `this` 父对象的普通 QObject 只由父子所有权销毁，不与手工 `delete`/`deleteLater` 混用。远端 JPEG 解码器同样先停止接收新任务、在线程内 shutdown，再等待线程结束。这一顺序避免 queued signal、定时器或 `readyRead` 在关闭期访问已销毁的窗口、UI 或 worker。
 
-音频关闭同样不会遗留后台线程：GUI 线程确认自己不在 AudioWorker 线程后，用 `Qt::BlockingQueuedConnection` 调用 `AudioWorker::shutdown()`；该槽会停止并在线程内删除 `QAudioSource`/`QAudioSink`、播放和统计定时器、关闭独立音频 UDP Socket 并清空缓存。随后在音频线程调用 `quit()`，GUI 线程无超时 `wait()`，确认结束后才删除 `QThread`；不会使用 `terminate()`、detach 或手动删除 AudioWorker。`main.cpp` 先在 GUI 线程初始化 Qt Multimedia 的默认设备后端，并显式禁用 quit lock，避免后端定时器跨线程析构或退出锁阻止最后窗口关闭。
-
-在全新 Debug/x64 构建中，应覆盖以下退出场景：未启动摄像头/UDP、仅绑定 UDP、摄像头运行、摄像头已停止、JPEG 发送、JPEG 接收解码，以及发送与接收同时进行。每次均应在 2 秒内以 exit code 0 结束，且没有 `video_call.exe` 残留、Visual C++ Runtime、QThread、QTimer、Socket 或 OpenCV 警告。
+在全新 Debug/x64 构建中，应覆盖以下退出场景：未启动摄像头/UDP、仅绑定 UDP、摄像头运行、摄像头已停止、JPEG 发送、JPEG 接收解码，以及发送与接收同时进行。每次均应在 2 秒内以 exit code 0 结束，且没有 `video_call.exe` 残留、Visual C++ Runtime、QThread、QTimer、Socket 或 OpenCV 警告。也可以使用 `video_call --shutdown-scenario=idle|udp|camera|camera-video|audio|audio-video|camera-restart` 对单个场景进行自动关闭验证。
 
 ## 下一步
 

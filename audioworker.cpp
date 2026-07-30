@@ -14,6 +14,9 @@
 #include <QMediaDevices>
 #include <QRandomGenerator>
 #include <QTimer>
+#include <QThread>
+
+#include <atomic>
 
 namespace {
 
@@ -30,6 +33,8 @@ QAudioFormat fixedAudioFormat()
     format.setSampleFormat(QAudioFormat::Int16);
     return format;
 }
+
+std::atomic_int g_audioWorkerDestructionCount{0};
 
 } // namespace
 
@@ -54,11 +59,23 @@ AudioWorker::AudioWorker(QObject *parent)
 
 AudioWorker::~AudioWorker()
 {
-    stopAudioInternal(false);
-    if (m_transport) {
-        m_transport->close();
-    }
-    qInfo().noquote() << QStringLiteral("[AudioWorker] 析构。");
+    shutdown();
+    const int destructionCount = ++g_audioWorkerDestructionCount;
+    qInfo().nospace() << "[AudioWorker] destroyed #" << destructionCount
+                      << " this=" << static_cast<const void *>(this)
+                      << " currentThreadId=" << QThread::currentThreadId()
+                      << " objectThread=" << thread()
+                      << " objectThreadRunning=" << (thread() && thread()->isRunning());
+}
+
+int AudioWorker::destructionCount()
+{
+    return g_audioWorkerDestructionCount.load();
+}
+
+void AudioWorker::resetDestructionCount()
+{
+    g_audioWorkerDestructionCount.store(0);
 }
 
 void AudioWorker::configureNetwork(const QString &localAddress,
@@ -66,6 +83,9 @@ void AudioWorker::configureNetwork(const QString &localAddress,
                                    quint16 localPort,
                                    quint16 peerPort)
 {
+    if (m_shutdown) {
+        return;
+    }
     stopAudioInternal(true);
     m_networkReady = false;
     m_jitterBuffer.clear();
@@ -109,7 +129,7 @@ void AudioWorker::configureNetwork(const QString &localAddress,
 
 void AudioWorker::startAudio()
 {
-    if (m_running) {
+    if (m_shutdown || m_running) {
         return;
     }
     if (!m_networkReady || !m_transport || !m_transport->isBound()) {
@@ -194,24 +214,27 @@ void AudioWorker::startAudio()
 
 void AudioWorker::stopAudio()
 {
+    if (m_shutdown) {
+        return;
+    }
     stopAudioInternal(true);
 }
 
 void AudioWorker::shutdown()
 {
-    stopAudioInternal(true);
+    if (m_shutdown) {
+        return;
+    }
+    m_shutdown = true;
+    stopAudioInternal(false);
     if (m_playoutTimer) {
-        delete m_playoutTimer;
-        m_playoutTimer = nullptr;
+        m_playoutTimer->stop();
     }
     if (m_statisticsTimer) {
-        delete m_statisticsTimer;
-        m_statisticsTimer = nullptr;
+        m_statisticsTimer->stop();
     }
     if (m_transport) {
         m_transport->close();
-        delete m_transport;
-        m_transport = nullptr;
     }
     m_networkReady = false;
     m_jitterBuffer.clear();

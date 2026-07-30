@@ -49,6 +49,9 @@ public:
     explicit AudioWorker(QObject *parent = nullptr);
     ~AudioWorker() override;
 
+    static int destructionCount();
+    static void resetDestructionCount();
+
 public slots:
     void configureNetwork(const QString &localAddress,
                           const QString &peerAddress,
@@ -114,6 +117,7 @@ private:
     bool m_networkReady = false;
     bool m_running = false;
     bool m_stopping = false;
+    bool m_shutdown = false;
 
     quint64 m_sentPacketsInterval = 0;
     quint64 m_receivedPacketsInterval = 0;
