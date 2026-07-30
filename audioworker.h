@@ -50,7 +50,10 @@ public:
     ~AudioWorker() override;
 
 public slots:
-    void configureNetwork(const QString &peerAddress, quint16 localPort, quint16 peerPort);
+    void configureNetwork(const QString &localAddress,
+                          const QString &peerAddress,
+                          quint16 localPort,
+                          quint16 peerPort);
     void startAudio();
     void stopAudio();
     void shutdown();

@@ -9,14 +9,17 @@
 
 #include <QBuffer>
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDataStream>
 #include <QDebug>
 #include <QFontMetrics>
 #include <QIODevice>
 #include <QLabel>
 #include <QMetaObject>
+#include <QNetworkInterface>
 #include <QPixmap>
 #include <QResizeEvent>
+#include <QSet>
 #include <QShowEvent>
 #include <QThread>
 #include <QTimer>
@@ -58,6 +61,7 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+    refreshLocalIpv4Addresses();
     setAudioStatus(QStringLiteral("音频：网络未配置"));
     updateVideoLabelGeometry(ui->localVideoContainer, ui->videoLabel);
     updateVideoLabelGeometry(ui->remoteVideoContainer, ui->remoteVideoLabel);
@@ -288,6 +292,10 @@ MainWindow::MainWindow(QWidget *parent)
             &QPushButton::clicked,
             this,
             &MainWindow::onStopAudioClicked);
+    connect(ui->refreshLocalAddressButton,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::refreshLocalIpv4Addresses);
 
     resetCameraUi();
     updateVideoSendUi();
@@ -416,6 +424,22 @@ void MainWindow::onApplyNetworkSettingsClicked()
         return;
     }
 
+    QHostAddress localAddress;
+    QString localAddressError;
+    if (!selectedLocalIpv4Address(&localAddress, &localAddressError)) {
+        if (m_videoUdpTransport) {
+            m_videoUdpTransport->close();
+        }
+        m_networkSettingsValid = false;
+        ui->applyNetworkSettingsButton->setEnabled(true);
+        ui->stopNetworkButton->setEnabled(false);
+        ui->sendTestFrameButton->setEnabled(false);
+        ui->networkStatusLabel->setText(QStringLiteral("网络：%1").arg(localAddressError));
+        resetRemoteVideoDisplay(QStringLiteral("远端接收：网络未启动"));
+        updateVideoSendUi();
+        return;
+    }
+
     if (!m_videoUdpTransport) {
         m_networkSettingsValid = false;
         ui->stopNetworkButton->setEnabled(false);
@@ -429,7 +453,7 @@ void MainWindow::onApplyNetworkSettingsClicked()
     m_videoUdpTransport->close();
     m_videoUdpTransport->configurePeer(candidateAddress, static_cast<quint16>(peerPort));
     QString bindError;
-    if (!m_videoUdpTransport->bindReceiver(QHostAddress::AnyIPv4,
+    if (!m_videoUdpTransport->bindReceiver(localAddress,
                                             static_cast<quint16>(localPort),
                                             &bindError)) {
         m_networkSettingsValid = false;
@@ -451,7 +475,8 @@ void MainWindow::onApplyNetworkSettingsClicked()
     ui->sendTestFrameButton->setEnabled(true);
 
     ui->networkStatusLabel->setText(
-        QStringLiteral("网络：已绑定 0.0.0.0:%1 → %2:%3")
+        QStringLiteral("网络：已绑定 %1:%2 → %3:%4")
+            .arg(localAddress.toString())
             .arg(m_localVideoPort)
             .arg(m_peerAddress.toString())
             .arg(m_peerVideoPort));
@@ -577,6 +602,17 @@ void MainWindow::onApplyAudioSettingsClicked()
         setAudioStatus(QStringLiteral("音频：对端 IPv4 地址无效"));
         return;
     }
+
+    QHostAddress localAddress;
+    QString localAddressError;
+    if (!selectedLocalIpv4Address(&localAddress, &localAddressError)) {
+        m_audioNetworkSettingsValid = false;
+        m_audioRunning = false;
+        ui->startAudioButton->setEnabled(false);
+        ui->stopAudioButton->setEnabled(false);
+        setAudioStatus(QStringLiteral("音频：%1").arg(localAddressError));
+        return;
+    }
     if (!m_audioWorker || !m_audioThread || !m_audioThread->isRunning()) {
         m_audioNetworkSettingsValid = false;
         m_audioRunning = false;
@@ -591,9 +627,79 @@ void MainWindow::onApplyAudioSettingsClicked()
     ui->startAudioButton->setEnabled(false);
     ui->stopAudioButton->setEnabled(false);
     setAudioStatus(QStringLiteral("音频：正在配置网络……"));
-    emit requestConfigureAudioNetwork(peerAddress,
+    emit requestConfigureAudioNetwork(localAddress.toString(),
+                                      peerAddress,
                                       static_cast<quint16>(ui->localAudioPortSpinBox->value()),
                                       static_cast<quint16>(ui->peerAudioPortSpinBox->value()));
+}
+
+void MainWindow::refreshLocalIpv4Addresses()
+{
+    const QString previousAddress = ui->localAddressComboBox->currentData().toString();
+    ui->localAddressComboBox->clear();
+    ui->localAddressComboBox->addItem(QStringLiteral("127.0.0.1（回环，仅用于同机测试）"),
+                                      QHostAddress(QHostAddress::LocalHost).toString());
+
+    QSet<QString> addedAddresses;
+    addedAddresses.insert(QHostAddress(QHostAddress::LocalHost).toString());
+    const QList<QNetworkInterface> interfaces = QNetworkInterface::allInterfaces();
+    for (const QNetworkInterface &interface : interfaces) {
+        const QNetworkInterface::InterfaceFlags flags = interface.flags();
+        if (!flags.testFlag(QNetworkInterface::IsUp)
+            || !flags.testFlag(QNetworkInterface::IsRunning)
+            || flags.testFlag(QNetworkInterface::IsLoopBack)) {
+            continue;
+        }
+
+        const QString interfaceName = interface.humanReadableName().trimmed().isEmpty()
+            ? interface.name()
+            : interface.humanReadableName();
+        const QList<QNetworkAddressEntry> entries = interface.addressEntries();
+        for (const QNetworkAddressEntry &entry : entries) {
+            const QHostAddress address = entry.ip();
+            if (address.protocol() != QAbstractSocket::IPv4Protocol
+                || address.isNull()
+                || address == QHostAddress::LocalHost) {
+                continue;
+            }
+
+            const QString addressText = address.toString();
+            if (addedAddresses.contains(addressText)) {
+                continue;
+            }
+            addedAddresses.insert(addressText);
+            ui->localAddressComboBox->addItem(
+                QStringLiteral("%1（%2）").arg(addressText, interfaceName),
+                addressText);
+        }
+    }
+
+    const int previousIndex = ui->localAddressComboBox->findData(previousAddress);
+    if (previousIndex >= 0) {
+        ui->localAddressComboBox->setCurrentIndex(previousIndex);
+    }
+}
+
+bool MainWindow::selectedLocalIpv4Address(QHostAddress *address, QString *errorMessage) const
+{
+    const QString addressText = ui->localAddressComboBox->currentData().toString().trimmed();
+    QHostAddress parsedAddress;
+    if (addressText.isEmpty()
+        || !parsedAddress.setAddress(addressText)
+        || parsedAddress.protocol() != QAbstractSocket::IPv4Protocol) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请选择有效的本机 IPv4 地址；网卡状态变化后请刷新 IP 列表。");
+        }
+        return false;
+    }
+
+    if (address) {
+        *address = parsedAddress;
+    }
+    if (errorMessage) {
+        errorMessage->clear();
+    }
+    return true;
 }
 
 void MainWindow::onStartAudioClicked()

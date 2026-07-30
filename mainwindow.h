@@ -42,7 +42,8 @@ signals:
     void requestStopCamera();
     void requestStartVideoEncoding(int targetFps, int jpegQuality);
     void requestStopVideoEncoding();
-    void requestConfigureAudioNetwork(const QString &peerAddress,
+    void requestConfigureAudioNetwork(const QString &localAddress,
+                                      const QString &peerAddress,
                                       quint16 localPort,
                                       quint16 peerPort);
     void requestStartAudio();
@@ -71,6 +72,7 @@ private slots:
     void onApplyAudioSettingsClicked();
     void onStartAudioClicked();
     void onStopAudioClicked();
+    void refreshLocalIpv4Addresses();
     void onUdpFrameReceived(const QByteArray &encodedFrame,
                             quint32 sessionId,
                             quint32 frameId,
@@ -151,6 +153,7 @@ private:
     void clearRemoteReceiveStatistics();
     void advanceRemoteReceiveGeneration();
     void reportRemoteDecodeFailure(const QString &message);
+    bool selectedLocalIpv4Address(QHostAddress *address, QString *errorMessage) const;
     QByteArray createDeterministicTestFrame(quint32 sequence) const;
     bool validateDeterministicTestFrame(const QByteArray &frame,
                                         quint32 *sequence,

@@ -61,7 +61,10 @@ AudioWorker::~AudioWorker()
     qInfo().noquote() << QStringLiteral("[AudioWorker] 析构。");
 }
 
-void AudioWorker::configureNetwork(const QString &peerAddress, quint16 localPort, quint16 peerPort)
+void AudioWorker::configureNetwork(const QString &localAddress,
+                                   const QString &peerAddress,
+                                   quint16 localPort,
+                                   quint16 peerPort)
 {
     stopAudioInternal(true);
     m_networkReady = false;
@@ -71,27 +74,36 @@ void AudioWorker::configureNetwork(const QString &peerAddress, quint16 localPort
         return;
     }
 
-    QHostAddress address;
-    if (!address.setAddress(peerAddress.trimmed())
-        || address.protocol() != QAbstractSocket::IPv4Protocol) {
+    QHostAddress local;
+    if (!local.setAddress(localAddress.trimmed())
+        || local.protocol() != QAbstractSocket::IPv4Protocol) {
+        m_transport->close();
+        reportError(QStringLiteral("音频本地 IPv4 地址无效。"));
+        return;
+    }
+
+    QHostAddress peer;
+    if (!peer.setAddress(peerAddress.trimmed())
+        || peer.protocol() != QAbstractSocket::IPv4Protocol) {
         m_transport->close();
         reportError(QStringLiteral("音频对端 IPv4 地址无效。"));
         return;
     }
 
     m_transport->close();
-    m_transport->configurePeer(address, peerPort);
+    m_transport->configurePeer(peer, peerPort);
     QString bindError;
-    if (!m_transport->bindReceiver(QHostAddress::AnyIPv4, localPort, &bindError)) {
+    if (!m_transport->bindReceiver(local, localPort, &bindError)) {
         reportError(QStringLiteral("音频网络配置失败：%1").arg(bindError));
         return;
     }
 
     m_networkReady = true;
     emit audioNetworkReady(
-        QStringLiteral("音频：已绑定 0.0.0.0:%1 → %2:%3")
+        QStringLiteral("音频：已绑定 %1:%2 → %3:%4")
+            .arg(local.toString())
             .arg(m_transport->localPort())
-            .arg(address.toString())
+            .arg(peer.toString())
             .arg(peerPort));
 }
 
