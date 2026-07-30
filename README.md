@@ -257,6 +257,50 @@ python tools/udp_test_receiver.py --bind 0.0.0.0 --port 5000 --once
 
 发送状态约每秒显示实际成功提交给 `QUdpSocket::writeDatagram()` 的 JPEG payload 统计：目标 FPS、按真实经过时间计算的实际 FPS、平均 JPEG KB/帧、JPEG payload Mbit/s、平均分片数和 JPEG 编码耗时。该码率不包含 IP、UDP 或以太网开销；`writeDatagram()` 成功也不表示对端已收到。发送端不等待 ACK，也不检测对端是否在线。
 
+## FPGA UDP 回环视频丢包修复报告
+
+### 现象
+
+摄像头发送端设置为 10 FPS，经 FPGA UDP 回环后，接收端只能完成约 1 FPS 的 JPEG 重组。这里的“完成”是指一张 JPEG 的所有 VCL1 分片都已收到；并不是某个 UDP 包收到即可显示。因此，即使只丢失一片，接收端也会在重组超时后丢弃整张视频帧，帧率会被放大式地降低。
+
+### 原因分析
+
+VCL1 每个 UDP 数据报最大 1200 bytes，其中固定协议头占 32 bytes，实际 JPEG 数据最多为 1168 bytes。一张 50,000-byte JPEG 需 `ceil(50000 / 1168) = 43` 个 UDP 分片。原实现对一帧 JPEG 调用 `fragmentEncodedFrame()` 后，在同一个 Qt 事件循环中连续调用 43 次 `QUdpSocket::writeDatagram()`；操作系统会把这些数据报以网卡可用的最高瞬时速率发出，而不是按 10 FPS 均匀分布。
+
+FPGA 的以太网回环通路是流式处理：TEMAC RX 没有接入可反馈给上位机的 `tready`/反压信号，接收侧只能依赖有限的 RX FIFO、UDP payload FIFO 和已完成 UDP 包的描述符 FIFO 吸收突发。当前描述符 FIFO 的深度为 16 包。即使平均视频码率远低于链路能力，几十个分片在极短时间内到达仍可能使这些有限队列积压；队列不足时，TEMAC 无法要求发送端暂停，结果只能丢弃后续数据。
+
+全双工只保证 RX 和 TX 电气链路可同时工作，并不消除同一方向上“输入突发速度大于本地队列可吸收速度”的问题。`writeDatagram()` 返回成功也仅表示数据已交给本机 UDP/IP 栈，不表示 FPGA 已收下，更不表示回环端已经完成视频帧重组。
+
+`iladatarxaxi.csv` 中 `rx_fifo_full` 未置位，不能据此排除该问题：导出文件中的 `rx_state[0:0]` 和 `gmii_rxd[3:0]` 分别只有 1 bit、4 bit，而当前 RTL 中相应探针应为 2 bit、8 bit。这说明该 CSV 对应的 ILA/LTX 探针定义已经过期或未重新生成；同时它只截取到一段短帧，并未覆盖摄像头的连续分片突发。因此该采样仅能说明“该窗口内 RX FIFO 未满”，不能证明视频传输期间所有缓存都未溢出。
+
+### 修复方案
+
+发送端已在 `VideoUdpTransport` 中加入逐分片的线速整形：
+
+- 限速常量为 `FpgaLoopbackWireRateMbitPerSecond = 80.0`，留出充足余量给 FPGA 的跨时钟、协议解析和发送调度。
+- 间隔按实际线上占用计算：前导码/SFD 8 bytes、以太网头 14 bytes、IPv4 头 20 bytes、UDP 头 8 bytes、VCL1 数据报、FCS 4 bytes 和 IFG 12 bytes。
+- 每次发送前使用单调时钟等待到下一数据报截止时刻；若编码、GUI 调度或系统调度已落后，则从当前时刻重新计时，**不追赶**之前错过的时隙，避免形成补发微突发。
+- 在重新绑定本地 Socket、重新配置对端和关闭传输时重置节流时钟，避免上一次会话的截止时间影响下一次会话。
+
+以满载 VCL1 数据报为例，线上占用为 `8 + 14 + 20 + 8 + 1200 + 4 + 12 = 1266 bytes`。在 80 Mbit/s 限制下，两个此类分片至少间隔约 126.6 µs；上述 50,000-byte JPEG 的 43 个分片约占用 5.44 ms，仍显著小于 10 FPS 对应的 100 ms 帧周期。因此，这个节流限制的是**帧内突发速率**，而不是把配置的发送帧率固定降为 1 FPS。
+
+实现位置：
+
+- `videoudptransport.cpp`：`datagramWireTimeNs()` 计算线上时间，`paceDatagram()` 实施整形。
+- `videoudptransport.h`：保存单调节流时钟和下一分片截止时间。
+
+### 适用范围与限制
+
+此修复解决的是上位机向 FPGA 连续灌入分片造成的微突发问题，不把 UDP 变为可靠传输：协议仍没有 ACK、重传、拥塞反馈或逐帧确认。如果 JPEG 平均码率本身持续超过 80 Mbit/s，发送过程会跨越多个帧周期，应用仍应降低分辨率、JPEG 质量或发送帧率。
+
+FPGA 侧仍应保留缓存保护和正确的 ILA 诊断。重新采集时必须先重新生成 ILA IP、实现 bitstream 和对应的 `.ltx`，保证探针宽度与 RTL 一致；建议触发条件覆盖连续视频分片，并同时观察 RX FIFO 满、payload FIFO 接近满、描述符 FIFO 满/丢包计数和 UDP `rec_pkt_done`。仅观察 `rx_fifo_full` 不能定位全部缓冲路径。
+
+### 验证结果与板卡复测步骤
+
+已在本机重新构建 `video_call` 和 `video_udp_transport_test`。后者覆盖 100-byte 单分片、50,000-byte 多分片双向传输及连续五帧多分片传输，运行退出码为 0。该测试验证 VCL1 分片、节流和本机 UDP 重组逻辑；它不替代 FPGA 实物链路测试。
+
+板卡复测应按以下方式进行：关闭所有旧的 `video_call.exe` 进程，启动重新构建的程序；保持视频端口为 FPGA 监听端口（例如 5000）；选择实际连接 FPGA 网口的本机 IPv4；以 10 FPS 连续发送至少 30 秒。发送端状态中的实际 FPS 应接近目标值，回环接收端的完成/显示 FPS 应接近发送端，且不应持续累积 VCL1 重组超时。若仍有明显帧级丢失，应使用已重新生成探针定义的 ILA 捕获连续分片，再依据上述四类队列/完成信号定位 FPGA 内部瓶颈。
+
 ## Python JPEG 接收
 
 `tools/udp_jpeg_receiver.py` 复用 `udp_test_receiver.py` 中的 VCL1 协议解析和重组器，并使用 OpenCV Python 解码和显示 JPEG。标准库测试接收器仍不需要第三方依赖；JPEG 显示接收器需要安装：
