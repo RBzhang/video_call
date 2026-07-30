@@ -55,6 +55,9 @@ private slots:
     void cleanupExpiredFrames();
 
 private:
+    void paceDatagram(qsizetype datagramSize);
+    void resetDatagramPacer();
+
     QUdpSocket *m_socket = nullptr;
     QTimer *m_cleanupTimer = nullptr;
 
@@ -66,6 +69,8 @@ private:
     quint32 m_sessionId = 0;
     quint32 m_nextFrameId = 1;
     QElapsedTimer m_monotonicClock;
+    QElapsedTimer m_pacingClock;
+    qint64 m_nextDatagramDeadlineNs = 0;
 };
 
 #endif // VIDEOUDPTRANSPORT_H

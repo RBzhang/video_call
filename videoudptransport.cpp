@@ -6,11 +6,35 @@
 #include <QDateTime>
 #include <QNetworkDatagram>
 #include <QRandomGenerator>
+#include <QThread>
 #include <QTimer>
 #include <QUdpSocket>
 
 namespace
 {
+
+// FPGA 回环端没有可用的 TEMAC RX 反压通路，且其包描述符队列仅能容纳有限
+// 的短时突发。视频一帧的所有分片必须按线速整形，而不能在一个事件循环中突发。
+constexpr double FpgaLoopbackWireRateMbitPerSecond = 80.0;
+constexpr qint64 EthernetPreambleAndSfdBytes = 8;
+constexpr qint64 EthernetHeaderBytes = 14;
+constexpr qint64 Ipv4HeaderBytes = 20;
+constexpr qint64 UdpHeaderBytes = 8;
+constexpr qint64 EthernetFcsBytes = 4;
+constexpr qint64 EthernetIfgBytes = 12;
+
+qint64 datagramWireTimeNs(qsizetype udpPayloadSize)
+{
+    const qint64 wireBytes = EthernetPreambleAndSfdBytes
+        + EthernetHeaderBytes
+        + Ipv4HeaderBytes
+        + UdpHeaderBytes
+        + udpPayloadSize
+        + EthernetFcsBytes
+        + EthernetIfgBytes;
+    return static_cast<qint64>(
+        (static_cast<double>(wireBytes) * 8'000.0) / FpgaLoopbackWireRateMbitPerSecond);
+}
 
 void setError(QString *errorMessage, const QString &message)
 {
@@ -45,6 +69,7 @@ VideoUdpTransport::VideoUdpTransport(QObject *parent)
             &VideoUdpTransport::cleanupExpiredFrames);
     m_cleanupTimer->setInterval(100);
     m_monotonicClock.start();
+    m_pacingClock.start();
 }
 
 VideoUdpTransport::~VideoUdpTransport()
@@ -71,6 +96,7 @@ bool VideoUdpTransport::bindReceiver(const QHostAddress &localAddress,
     }
 
     m_cleanupTimer->start();
+    resetDatagramPacer();
     clearError(errorMessage);
     return true;
 }
@@ -85,6 +111,7 @@ void VideoUdpTransport::configurePeer(const QHostAddress &peerAddress, quint16 p
 
     m_peerAddress = peerAddress;
     m_peerPort = peerPort;
+    resetDatagramPacer();
 }
 
 void VideoUdpTransport::close()
@@ -98,6 +125,7 @@ void VideoUdpTransport::close()
 
     // 保留对端配置，以便调用方重新绑定后继续使用同一对端。
     m_reassembler.clear();
+    resetDatagramPacer();
 }
 
 bool VideoUdpTransport::isBound() const
@@ -165,6 +193,7 @@ bool VideoUdpTransport::sendEncodedFrame(const QByteArray &encodedFrame,
 
     for (qsizetype index = 0; index < datagrams.size(); ++index) {
         const QByteArray &datagram = datagrams.at(index);
+        paceDatagram(datagram.size());
         const qint64 written = m_socket->writeDatagram(datagram, m_peerAddress, m_peerPort);
         if (written != datagram.size()) {
             const QString message = QStringLiteral("发送帧 %1 的分片 %2 失败：%3")
@@ -184,6 +213,37 @@ bool VideoUdpTransport::sendEncodedFrame(const QByteArray &encodedFrame,
     }
     clearError(errorMessage);
     return true;
+}
+
+void VideoUdpTransport::paceDatagram(qsizetype datagramSize)
+{
+    const qint64 intervalNs = datagramWireTimeNs(datagramSize);
+    if (!m_pacingClock.isValid()) {
+        m_pacingClock.start();
+    }
+
+    qint64 nowNs = m_pacingClock.nsecsElapsed();
+    if (m_nextDatagramDeadlineNs < nowNs) {
+        // 不追赶落后的发送时隙，避免编码或 UI 调度延迟后形成微突发。
+        m_nextDatagramDeadlineNs = nowNs;
+    }
+
+    while ((nowNs = m_pacingClock.nsecsElapsed()) < m_nextDatagramDeadlineNs) {
+        const qint64 remainingNs = m_nextDatagramDeadlineNs - nowNs;
+        if (remainingNs > 2'000'000) {
+            QThread::usleep(static_cast<unsigned long>((remainingNs - 1'000'000) / 1'000));
+        }
+    }
+
+    m_nextDatagramDeadlineNs = m_pacingClock.nsecsElapsed() + intervalNs;
+}
+
+void VideoUdpTransport::resetDatagramPacer()
+{
+    if (!m_pacingClock.isValid()) {
+        m_pacingClock.start();
+    }
+    m_nextDatagramDeadlineNs = m_pacingClock.nsecsElapsed();
 }
 
 void VideoUdpTransport::readPendingDatagrams()
