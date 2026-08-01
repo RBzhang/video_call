@@ -1,6 +1,6 @@
 # video_call
 
-基于 Qt Widgets、OpenCV 和 Qt Multimedia 的 Windows 桌面音视频传输项目。当前已完成本机摄像头预览、JPEG/UDP 视频传输、ACL1 PCM 音频传输，以及 Qt 端远端 JPEG 解码显示；它不是完整的商用视频通话系统。
+基于 Qt Widgets、OpenCV、Qt Multimedia 和本地 WebRTC Audio Processing Module（APM/AEC3）的 Windows 桌面音视频传输项目。当前已完成本机摄像头预览、JPEG/UDP 视频传输、ACL1 PCM 音频传输、本地 PCM 回声消除，以及 Qt 端远端 JPEG 解码显示；它不是完整的商用视频通话系统。
 
 ## 开发环境
 
@@ -32,13 +32,14 @@
 - 已加入 CTest 协议、重组器、双端点真实 UDP 回环、JPEG 编解码和帧率区间计算测试，覆盖单分片、多分片、最大负载、常见格式错误、乱序重组、JPEG 边界标记与尺寸验证，以及 1–30 FPS 的调度区间。
 - 已实现独立 ACL1 音频协议、独立 UDP Socket/端口、`AudioJitterBuffer` 和运行在专用 `QThread` 的 `AudioWorker`。麦克风采集、扬声器播放、定时播放和网络收发均不在 GUI 线程运行。
 - 音频固定为 16 kHz、单声道、Little Endian signed Int16 PCM；每 20 ms 发送一个 640-byte payload，不压缩、不分片。
+- 已接入本地 WebRTC APM/AEC3：播放侧在抖动缓冲调度后把实际将送往 `QAudioSink` 的 PCM（含静音补偿包）传给 `ProcessReverseStream()`；采集侧在原有 ACL1 发送前把麦克风 PCM 传给 `ProcessStream()`。UDP 协议、包长度、50 包/s 节奏和视频链路均未改变。
 - 启动音频时严格检查默认输入和输出设备是否支持固定格式；不支持时不会隐式重采样或以不一致格式启动。
 - 关闭窗口会先在 AudioWorker 所在线程停止 Source/Sink、定时器和 UDP Socket，再 `quit()`、无超时 `wait()` 并删除 `QThread`。为避免 Qt Multimedia 的退出锁阻止最后窗口关闭，程序显式禁用了 quit lock；不使用 `QThread::terminate()`。
 
 ## 明确尚未实现
 
 - 音频压缩、Opus、AAC
-- AEC、降噪、自动增益、混音和音视频同步
+- 混音和音视频同步
 - 设备选择下拉框、呼叫控制和在线检测
 - ACK、丢包重传与前向纠错
 - TCP、GStreamer、FFmpeg API、WebRTC
@@ -96,7 +97,36 @@ ACL1 的 32-byte 头始终按 Big Endian 网络字节序序列化；PCM payload 
 
 接收端使用纯逻辑 `AudioJitterBuffer`：三包预缓冲（60 ms）、最多十包（200 ms）、小范围乱序排序、重复包丢弃和迟到包丢弃。播放缺失包时写入严格的 640-byte 全零静音；连续缺失五包后退出播放状态并重新预缓冲。不会动态变速、拉伸或重采样。
 
-`AudioWorker` 位于独立 `QThread`，拥有 `AudioUdpTransport`、`QAudioSource`、`QAudioSink`、采集/播放 `QIODevice`、20 ms `Qt::PreciseTimer` 和 1 秒统计定时器。采集端把不规则 `readyRead()` 数据累积后按 640 bytes 切包，采集缓存上限为 6400 bytes；播放端正确处理部分写入，待写缓存最多五包。固定两行状态面板显示实际发送/接收 packets/s、payload Mbit/s、抖动深度、静音补偿、重复/迟到/外源/无效包和输入/播放溢出；输入/输出设备与实际 Source/Sink bufferSize 仅在 tooltip 中提供。
+`AudioWorker` 位于独立 `QThread`，拥有 `AudioUdpTransport`、`QAudioSource`、`QAudioSink`、采集/播放 `QIODevice`、20 ms `Qt::PreciseTimer` 和 1 秒统计定时器。采集端把不规则 `readyRead()` 数据累积后按 640 bytes 切包，采集缓存上限为 6400 bytes；播放端正确处理部分写入，待写缓存最多五包。固定两行状态面板显示实际发送/接收 packets/s、payload Mbit/s、抖动深度、静音补偿、重复/迟到/外源/无效包和输入/播放溢出；输入/输出设备与实际 Source/Sink bufferSize 仅在 tooltip 中提供。界面另有“实际播放音量”区域：每约 100 ms 计算成功写入 `QAudioSink` 的 Int16 PCM RMS，显示百分比和 dBFS；它是数字样本幅度，不包含系统音量、功放或扬声器的物理声压。
+
+### WebRTC APM/AEC3 本地 PCM 处理
+
+APM 仅处理本机 PCM，不引入 WebRTC 的网络、媒体、编码或传输栈。网络格式仍固定为 16 kHz、单声道、Little Endian signed Int16、20 ms（320 samples / 640 bytes）。每个 20 ms 包在 `WebRtcAudioProcessor` 内按原顺序拆成两个 10 ms（160 samples / 320 bytes）帧：扬声器路径依次调用两次 `ProcessReverseStream()`，麦克风路径依次调用两次 `ProcessStream()` 后重新合并为原来的 640 bytes。
+
+运行时 APM 配置启用 AEC3、high-pass filter 和 Moderate noise suppression，关闭 AGC1 与 AGC2。reverse stream 的处理结果不会替换扬声器 PCM；这样 APM 收到的参考始终与实际写入 `QAudioSink` 的字节完全相同。capture stream 的处理结果才会发送至现有 `sendAudioPayload()`。
+
+初始本地流延迟为 `204 ms`，集中定义在 `WebRtcAudioProcessor::DefaultAecStreamDelayMs`。该值由当前默认 Realtek 扬声器/麦克风路径的四次独立测量（`200`、`203`、`204`、`209 ms`）取四值中位数后四舍五入获得。它表示从 render PCM 进入 APM 到其回声出现在麦克风 PCM 的本地音频路径延迟，不是网络 RTT，也不叠加抖动缓冲延迟；处理前会限制到 `0–500 ms`。状态 tooltip 会显示 APM 初始化状态、当前延迟、render/capture 失败数和旁路帧数；任何初始化或单帧失败都会保留原 PCM，不会中断通话。
+
+音频启动后可点击“校准 AEC 延时（10 秒）”。它会在现有 render 路径生成固定的 300–3000 Hz 扫频 PCM，依旧经过 `ProcessReverseStream()` 和 `QAudioSink`；同时只采集本机麦克风 PCM，利用 1–5 秒区间的归一化相关性搜索 `0–500 ms` 声学路径延时。达到相关性阈值后，测得值会立即作为后续 `set_stream_delay_ms()` 的运行时延时；未测到足够强的测试音时维持原值。测试期间不发送、不播放采集 PCM，末尾还会保留 500 ms 采集尾音，因此它不会把声音送入 UDP 回环。单实例发往自身**同一 UDP 本地端点**的回送包会被永久丢弃，避免麦克风直通扬声器自激；判定同时检查 ACL1 `sessionId` 和数据报来源端点。因此，来自 FPGA 或其他对端的透明回送可以保留原 `sessionId` 并正常进入播放/AEC 路径，只要它来自界面配置的对端 IP 与端口。
+
+要验证 AEC 是否真的抑制扬声器回声，点击相邻的“验证 AEC 效果（10 秒）”。它播放相同的固定扫频参考音，麦克风保持打开；每个采集 PCM 同时保留一份原始副本，并按通话时相同的 `ProcessStream()` 路径生成一份 AEC 后副本。测试结束后，界面显示与已知扬声器参考相关的回声分量由多少 dBFS 降到多少 dBFS，以及降低的 dB 值（正值越大越好）。这是真实的“扬声器 → 麦克风”本机声学验证：测试期间**不会发送或播放麦克风 PCM**，因此既保留了 AEC 所需的麦克风输入，又不会形成 UDP 自激回路。只有先检测到足够强的扬声器回声才会给出结果；否则会明确提示验证未完成，而不会把安静或耳机环境误报为 AEC 成功。
+
+此校准测得的是本机扬声器→麦克风的物理/驱动路径延时；必须在界面显示“AEC 已启用”（而非“未配置”或“初始化失败”）时才会影响回声消除效果。程序无法替代人工判断残余回声、双讲或扬声器音量；建议校准时保持安静、用内置扬声器和麦克风、避免耳机或蓝牙设备，并至少重复两次以确认结果稳定。
+
+### AEC3 开发、调试与验证记录
+
+本次实现没有接入 WebRTC 的通话网络栈，只使用其 Audio Processing Module：实际准备写入 `QAudioSink` 的远端 PCM 先进入 `ProcessReverseStream()`，本机采集 PCM 在发送 ACL1 前进入 `ProcessStream()`。这样 AEC3 的参考与扬声器实际播放的数据一致，网络协议仍是固定 16 kHz、单声道、20 ms / 640-byte 的 ACL1 包。
+
+为避免把“能听见声音”误判成“已经消除回声”，界面提供两个互补的十秒诊断：
+
+- “校准 AEC 延时”播放固定扫频并测量扬声器→麦克风声学路径；测得延时仅在当前音频启动期间生效，重新启动音频会恢复默认 `204 ms`。校准与网络地址、FPGA 和 UDP 回送无关，**不需要也不应先切换至 `127.0.0.1`**。
+- “验证 AEC 效果”保留同一段真实麦克风 PCM 的 AEC 前/后副本，量化与已知扬声器参考相关的回声分量；测试期间不发送或播放麦克风 PCM。一次默认 Realtek 扬声器/麦克风实测得到 `208 ms`，相关回声从 `-44.1 dBFS` 降至 `-89.8 dBFS`，降低 `45.8 dB`，相关性从 `0.1673` 降至 `0.0070`。数值会随设备、音量和环境变化。
+
+调试中发现两类容易混淆的“回环”：单实例 `127.0.0.1:5002` 软件回环会把本机麦克风直接送回本机扬声器，必然产生正反馈，因此必须丢弃；而 PC → FPGA → PC 的透明 UDP 回送虽然保留同一 ACL1 `sessionId`，但数据报来源是 FPGA 的配置端点（例如 `192.168.10.10:5002`），应进入播放和 AEC。此前仅凭相同 `sessionId` 丢弃，导致 FPGA 回送音频被误判为软件自回环；现已修复为同时匹配本机绑定的 UDP 来源 IP 与端口才丢弃。视频没有该 `sessionId` 接收过滤，所以该问题表现为“视频正常、音频无接收”。
+
+FPGA 实物回送的推荐顺序是：选择实际连接 FPGA 的本机网卡/IP，配置 FPGA IP 与音频端口 `5002`，应用并启动音频，随后直接执行本机 AEC 校准，最后进行 FPGA 回送测试。回送包需从界面配置的 FPGA IP/端口返回，并满足 ACL1 的固定 `672-byte` 数据报格式。修复后的闭环会真实播放回送音频；请先降低扬声器音量，因为即使 AEC 已启用，过高音量或不稳定的声学环境仍可能产生物理自激。
+
+验证覆盖固定 PCM 协议、抖动缓冲、真实 UDP 双端点、APM 20 ms/10 ms 子帧处理、声学延时估算、AEC 回声分量量化和 GUI 退出。新增 `audio_loop_policy_test` 明确验证：相同本地 UDP 端点会被识别为软件自回环，而 `192.168.10.10:5002` 这类 FPGA 对端不会被误丢弃。Debug 与 Release 均执行 CTest，当前 `13/13` 测试通过；物理 AEC 效果数值由上述十秒诊断在真实默认音频设备上取得。
 
 点击“应用音频设置”时复用现有“对端 IP”和“本机 IP”选择，并验证 IPv4；成功绑定后才可以点击“开始双向音频”。“本机 IP”会列出已启用网卡的 IPv4 及网卡名称，`127.0.0.1` 仅用于同机测试；需要经 Wi-Fi 或以太网通信时，应选择对应网卡的 IPv4。点击“刷新 IP”可重新扫描网卡。视频和音频 Socket 都绑定到该选择，因此发送数据报会使用指定 IP 作为源地址。启动时仅使用 `QMediaDevices` 的默认输入和输出，且两者都必须支持 16 kHz / 单声道 / Int16；不支持会显示设备描述及 preferred format，且不会启动或回退为其他网络格式。停止音频只停止音频，不停止摄像头、视频 UDP、视频编码或远端视频显示；重新应用音频设置会停止当前音频、清空抖动缓冲并重新绑定。
 
@@ -107,7 +137,7 @@ ACL1 的 32-byte 头始终按 Big Endian 网络字节序序列化；PCM payload 
 | A | `127.0.0.1` | 5002 | 5003 |
 | B | `127.0.0.1` | 5003 | 5002 |
 
-两台电脑测试时，两边都使用本地/对端 `5002`，对端 IP 填另一台电脑的局域网 IPv4，并允许 Windows 防火墙的 UDP 入站访问。应使用耳机：当前没有 AEC，扬声器声音被麦克风再次采集导致的啸叫不是 UDP 故障。音频和视频的端口、Socket、来源过滤、线程和状态均相互独立；协议不检测对端在线、不发送 ACK、不重传、不做 FEC。
+两台电脑测试时，两边都使用本地/对端 `5002`，对端 IP 填另一台电脑的局域网 IPv4，并允许 Windows 防火墙的 UDP 入站访问。建议先使用笔记本内置麦克风和内置扬声器验证 AEC；蓝牙扬声器、不同声卡时钟、麦克风削波、扬声器音效和过大音量都会降低效果。耳机模式通常不需要 AEC，但启用 AEC 不应导致程序异常。音频和视频的端口、Socket、来源过滤、线程和状态均相互独立；协议不检测对端在线、不发送 ACK、不重传、不做 FEC。
 
 ## 构建
 
@@ -141,6 +171,33 @@ C:/Opencv/opencv/build/x64/vc16/lib
 -DOpenCV_DIR=C:/Opencv/opencv/build/x64/vc16/lib
 ```
 
+要启用 AEC3，请提供本机已经构建好的**当前 WebRTC APM** target 或安装/源码根目录；工程不会下载、编译或 vendor WebRTC：
+
+```powershell
+# 推荐：由上层工程/包提供完整依赖闭包的 target。
+-DVIDEO_CALL_WEBRTC_APM_TARGET=WebRTC::webrtc
+
+# 或：根目录内可找到 api/audio/audio_processing.h 和 webrtc.lib。
+-DVIDEO_CALL_WEBRTC_APM_ROOT=C:/dev/webrtc-checkout/src
+```
+
+当前接入使用 WebRTC `api/audio/audio_processing.h`、`BuiltinAudioProcessingBuilder(config).Build(CreateEnvironment())`、`ProcessReverseStream()`、`set_stream_delay_ms()` 和 `ProcessStream()`。未配置本机 APM 时，CMake 会明确报告 APM disabled，程序仍可构建运行并以安全旁路发送原 PCM；配置有效的 target 后会自动定义 `VIDEO_CALL_HAVE_WEBRTC_APM` 并链接该 target。
+
+对 Windows + Qt MSVC，WebRTC 库的 C Runtime 必须和应用一致：Release 使用 `/MD`，Debug 使用 `/MDd`，且应以 `use_custom_libcxx=false` 构建。当前工程按 `CMAKE_BUILD_TYPE` 自动搜索 `out/Release/obj/webrtc.lib` 或 `out/Debug/obj/webrtc.lib`，不会把 Release 库链接给 Debug 程序。若以源码 checkout 直接构建静态 `webrtc.lib`，需在 `build/config/win/BUILD.gn` 的桌面 Windows 默认配置中将 `:static_crt` 改为 `:dynamic_crt`，然后分别生成并构建两个输出目录：
+
+```powershell
+# 在 C:/dev/webrtc-checkout/src 中执行；两种配置都保留 dynamic_crt 改动。
+gn gen out/Release --args='is_debug=false target_cpu="x64" is_component_build=false rtc_include_tests=false rtc_build_examples=false rtc_build_tools=false use_siso=false use_custom_libcxx=false'
+ninja -C out/Release webrtc
+
+gn gen out/Debug --args='is_debug=true target_cpu="x64" is_component_build=false rtc_include_tests=false rtc_build_examples=false rtc_build_tools=false use_siso=false use_custom_libcxx=false enable_iterator_debugging=true'
+ninja -C out/Debug webrtc
+```
+
+`enable_iterator_debugging=true` 仅为 Debug 输出所需：它使 WebRTC 的 `_ITERATOR_DEBUG_LEVEL` 与 Qt/MSVC Debug 保持一致。`gclient sync` 可能覆盖该 `BUILD.gn` 的本地 `dynamic_crt` 调整；同步后先重新应用它再执行 `gn gen`。Qt Creator 的 Debug Kit 应配置 `VIDEO_CALL_WEBRTC_APM_ROOT=C:/dev/webrtc-checkout/src` 并在 CMake 输出中确认 `WebRTC APM enabled`；Release Kit 同样使用此根目录即可。
+
+本地 `out/Debug/obj/webrtc.lib` 不带 AddressSanitizer instrumentation，因此在 Qt Creator 的 AEC3 Debug 配置中必须使用 `VIDEO_CALL_ENABLE_ASAN=OFF`。若同时开启 ASan，MSVC STL 的容器注释与 WebRTC 库不一致，会产生大量 `LNK2038`；CMake 会在配置阶段直接提示。只有提供一个同样以 ASan 构建、完整依赖闭包的 `VIDEO_CALL_WEBRTC_APM_TARGET` 时，才可以启用该选项。
+
 ## 运行时 DLL
 
 配置阶段会检查 `opencv_core`、`opencv_imgcodecs`、`opencv_imgproc` 和 `opencv_videoio` 导入目标是否同时提供 Debug/Release 的导入库和 DLL；缺少任一配置会直接报错。`video_call` 的构建后步骤会把**当前配置实际链接**的 Qt Core/Gui/Widgets/Network/Multimedia、OpenCV DLL 以及 Windows 平台插件复制到可执行文件目录：Debug 为 `Qt6*Cored.dll`/`opencv_*d.dll` 和 `platforms/qwindowsd.dll`，Release 为不带 `d` 后缀的对应文件和 `platforms/qwindows.dll`。因此 Qt Creator 可以直接运行该目录下的程序，不应依赖 `PATH` 恰好指向另一套 Qt 或 OpenCV。
@@ -163,7 +220,7 @@ OPENCV_VIDEOIO_DEBUG=1
 ctest --output-on-failure
 ```
 
-当前 CTest 包含十个测试目标：
+当前 CTest 包含十二个测试目标：
 
 - `video_packet_protocol_test`：协议序列化、解析与分片。
 - `video_frame_reassembler_test`：乱序、重复、冲突、超时和缓存限制重组测试。
@@ -173,12 +230,15 @@ ctest --output-on-failure
 - `audio_packet_protocol_test`：ACL1 固定头 Big Endian 序列化、严格解析和全部固定字段拒绝测试。
 - `audio_jitter_buffer_test`：三包预缓冲、乱序、重复、丢包静音、五包重缓冲、十包上限、session 重置和 sequence 回绕测试。
 - `audio_udp_transport_test`：两个 `AudioUdpTransport` 端点用系统分配端口进行双向、50 包连续、外源过滤、错误数据报和重新绑定测试。
+- `audio_loop_policy_test`：仅拦截同一本机 UDP 端点的软件自回环，允许 FPGA 等对端保留 ACL1 sessionId 的透明回送。
+- `webrtc_audio_processor_test`：20 ms/10 ms 拆分与重组、子帧顺序、错误长度旁路，以及 initialize/reset/shutdown 生命周期；不依赖物理音频设备。
+- `acoustic_delay_estimator_test`：已知声学副本延时的相关性估算、静音拒绝，以及 AEC 前后相关回声分量的量化。
 - `video_frame_rate_utils_test`：1–30 FPS 的毫秒区间计算，以及非法 FPS 拒绝。
 - `mainwindow_exit_smoke_test`：创建 `QApplication`/`MainWindow` 后自动关闭；无硬件时至少连续三次覆盖启动即退出和 UDP 配置即退出，有可用设备时继续覆盖摄像头、视频发送、音频和摄像头重启。它检查每个 worker 只析构一次，且没有 `QThread: Destroyed while thread is still running`。
 
 协议、重组器、UDP 回环和帧率工具测试不依赖 Qt Widgets；视频/音频 UDP 回环测试依赖 Qt Network；JPEG 编码和解码测试依赖 Qt Core/Gui 与 OpenCV。所有 CTest 都是无交互控制台测试，不需要显示 GUI 窗口。UDP 回环测试使用系统分配端口，不固定占用 5000、5001、5002 或 5003，测试完成后关闭 Socket。
 
-最近一次全新 Debug/x64、Release/x64 和 MSVC AddressSanitizer Debug 构建的 `ctest --output-on-failure` 均为 `10/10` 通过。AddressSanitizer 可用独立目录启用：
+AddressSanitizer 可用独立目录启用：
 
 ```powershell
 C:\Qt\Tools\CMake_64\bin\cmake.exe -S . -B build\asan-clean -DVIDEO_CALL_ENABLE_ASAN=ON -DOpenCV_DIR=C:\Opencv\opencv\build\x64\vc16\lib

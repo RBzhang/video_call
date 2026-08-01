@@ -18,6 +18,7 @@
 #include <QMetaObject>
 #include <QNetworkInterface>
 #include <QPixmap>
+#include <QProgressBar>
 #include <QResizeEvent>
 #include <QSet>
 #include <QShowEvent>
@@ -63,6 +64,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
     refreshLocalIpv4Addresses();
     setAudioStatus(QStringLiteral("音频：网络未配置"));
+    setPlaybackVolumeDisplay(0, -96.0);
     updateVideoLabelGeometry(ui->localVideoContainer, ui->videoLabel);
     updateVideoLabelGeometry(ui->remoteVideoContainer, ui->remoteVideoLabel);
 
@@ -147,6 +149,16 @@ MainWindow::MainWindow(QWidget *parent)
             m_audioWorker,
             &AudioWorker::stopAudio,
             Qt::QueuedConnection);
+    connect(this,
+            &MainWindow::requestPlayLocalAecTestTone,
+            m_audioWorker,
+            &AudioWorker::playLocalAecTestTone,
+            Qt::QueuedConnection);
+    connect(this,
+            &MainWindow::requestVerifyLocalAecEffect,
+            m_audioWorker,
+            &AudioWorker::verifyLocalAecEffect,
+            Qt::QueuedConnection);
     connect(m_audioWorker,
             &AudioWorker::audioNetworkReady,
             this,
@@ -171,6 +183,41 @@ MainWindow::MainWindow(QWidget *parent)
             &AudioWorker::audioStatisticsUpdated,
             this,
             &MainWindow::onAudioStatisticsUpdated,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::playbackVolumeUpdated,
+            this,
+            &MainWindow::onPlaybackVolumeUpdated,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::localAecTestToneStateChanged,
+            this,
+            &MainWindow::onLocalAecTestToneStateChanged,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::localAecDelayCalibrated,
+            this,
+            &MainWindow::onLocalAecDelayCalibrated,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::localAecDelayCalibrationFailed,
+            this,
+            &MainWindow::onLocalAecDelayCalibrationFailed,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::localAecEffectVerificationStateChanged,
+            this,
+            &MainWindow::onLocalAecEffectVerificationStateChanged,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::localAecEffectVerified,
+            this,
+            &MainWindow::onLocalAecEffectVerified,
+            Qt::QueuedConnection);
+    connect(m_audioWorker,
+            &AudioWorker::localAecEffectVerificationFailed,
+            this,
+            &MainWindow::onLocalAecEffectVerificationFailed,
             Qt::QueuedConnection);
     m_audioThread->start();
 
@@ -276,6 +323,14 @@ MainWindow::MainWindow(QWidget *parent)
             &QPushButton::clicked,
             this,
             &MainWindow::onStartAudioClicked);
+    connect(ui->playLocalAecTestToneButton,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::onPlayLocalAecTestToneClicked);
+    connect(ui->verifyLocalAecEffectButton,
+            &QPushButton::clicked,
+            this,
+            &MainWindow::onVerifyLocalAecEffectClicked);
     connect(ui->stopAudioButton,
             &QPushButton::clicked,
             this,
@@ -769,6 +824,8 @@ void MainWindow::onAudioNetworkReady(const QString &message)
     m_audioRunning = false;
     ui->startAudioButton->setEnabled(true);
     ui->stopAudioButton->setEnabled(false);
+    ui->playLocalAecTestToneButton->setEnabled(false);
+    ui->verifyLocalAecEffectButton->setEnabled(false);
     setAudioStatus(message, QString(), message);
 }
 
@@ -781,6 +838,8 @@ void MainWindow::onAudioStarted(const QString &message)
     m_audioRunning = true;
     ui->startAudioButton->setEnabled(false);
     ui->stopAudioButton->setEnabled(true);
+    ui->playLocalAecTestToneButton->setEnabled(true);
+    ui->verifyLocalAecEffectButton->setEnabled(true);
     setAudioStatus(message, QString(), message);
 }
 
@@ -793,6 +852,11 @@ void MainWindow::onAudioStopped()
 
     ui->startAudioButton->setEnabled(m_audioNetworkSettingsValid);
     ui->stopAudioButton->setEnabled(false);
+    ui->playLocalAecTestToneButton->setEnabled(false);
+    ui->verifyLocalAecEffectButton->setEnabled(false);
+    ui->playLocalAecTestToneButton->setText(QStringLiteral("校准 AEC 延时（10 秒）"));
+    ui->verifyLocalAecEffectButton->setText(QStringLiteral("验证 AEC 效果（10 秒）"));
+    setPlaybackVolumeDisplay(0, -96.0);
     setAudioStatus(QStringLiteral("音频：已停止（网络保持绑定）"));
 }
 
@@ -805,6 +869,11 @@ void MainWindow::onAudioError(const QString &message)
 
     ui->startAudioButton->setEnabled(m_audioNetworkSettingsValid);
     ui->stopAudioButton->setEnabled(false);
+    ui->playLocalAecTestToneButton->setEnabled(false);
+    ui->verifyLocalAecEffectButton->setEnabled(false);
+    ui->playLocalAecTestToneButton->setText(QStringLiteral("校准 AEC 延时（10 秒）"));
+    ui->verifyLocalAecEffectButton->setText(QStringLiteral("验证 AEC 效果（10 秒）"));
+    setPlaybackVolumeDisplay(0, -96.0);
     setAudioStatus(QStringLiteral("音频：%1").arg(message), QString(), message);
 }
 
@@ -823,21 +892,155 @@ void MainWindow::onAudioStatisticsUpdated(const AudioStatistics &statistics)
             .arg(statistics.jitterBufferedPackets)
             .arg(statistics.jitterBufferedMilliseconds);
     const QString secondaryText =
-        QStringLiteral("补偿 %1｜重复 %2｜迟到 %3｜外源 %4｜无效 %5｜采集溢出 %6｜播放溢出 %7")
+        QStringLiteral("补偿 %1｜重复 %2｜迟到 %3｜外源 %4｜无效 %5｜采集溢出 %6｜播放溢出 %7｜本机回环丢弃 %8｜AEC %9｜旁路 %10")
             .arg(statistics.concealedPackets)
             .arg(statistics.duplicatePackets)
             .arg(statistics.latePackets)
             .arg(statistics.foreignPackets)
             .arg(statistics.invalidPackets)
             .arg(statistics.captureOverruns)
-            .arg(statistics.playbackOverruns);
+            .arg(statistics.playbackOverruns)
+            .arg(statistics.localLoopbackPackets)
+            .arg(statistics.aecInitialized && statistics.aecEnabled
+                     ? QStringLiteral("开启")
+                     : (statistics.aecBackendAvailable ? QStringLiteral("初始化失败")
+                                                       : QStringLiteral("未配置")))
+            .arg(statistics.aecBypassedFrames);
     const QString details =
-        QStringLiteral("输入设备：%1\n输出设备：%2\n输入缓冲：%3 bytes\n输出缓冲：%4 bytes\n当前 PCM 格式：16 kHz / mono / Int16")
+        QStringLiteral("输入设备：%1\n输出设备：%2\n输入缓冲：%3 bytes\n输出缓冲：%4 bytes\n当前 PCM 格式：16 kHz / mono / Int16\n"
+                       "WebRTC APM/AEC3：%5｜streamDelay：%6 ms｜render 失败：%7｜capture 失败：%8\n"
+                       "同一发送会话的 UDP 回环包已丢弃：%9（防止单实例麦克风→扬声器自激）")
             .arg(statistics.inputDeviceDescription)
             .arg(statistics.outputDeviceDescription)
             .arg(statistics.sourceBufferSize)
-            .arg(statistics.sinkBufferSize);
+            .arg(statistics.sinkBufferSize)
+            .arg(statistics.aecInitialized && statistics.aecEnabled
+                     ? QStringLiteral("已启用")
+                     : (statistics.aecBackendAvailable ? QStringLiteral("初始化失败")
+                                                       : QStringLiteral("本机未配置")))
+            .arg(statistics.aecStreamDelayMs)
+            .arg(statistics.aecRenderProcessFailures)
+            .arg(statistics.aecCaptureProcessFailures)
+            .arg(statistics.localLoopbackPackets);
     setAudioStatus(primaryText, secondaryText, details);
+}
+
+void MainWindow::onPlaybackVolumeUpdated(int rmsPercent, double rmsDbfs)
+{
+    if (m_shuttingDown || !m_audioRunning) {
+        return;
+    }
+    setPlaybackVolumeDisplay(rmsPercent, rmsDbfs);
+}
+
+void MainWindow::onPlayLocalAecTestToneClicked()
+{
+    if (m_shuttingDown || !m_audioRunning || !m_audioWorker || !m_audioThread
+        || !m_audioThread->isRunning()) {
+        return;
+    }
+    ui->playLocalAecTestToneButton->setEnabled(false);
+    ui->verifyLocalAecEffectButton->setEnabled(false);
+    ui->playLocalAecTestToneButton->setText(QStringLiteral("正在校准 AEC 延时…"));
+    emit requestPlayLocalAecTestTone();
+}
+
+void MainWindow::onVerifyLocalAecEffectClicked()
+{
+    if (m_shuttingDown || !m_audioRunning || !m_audioWorker || !m_audioThread
+        || !m_audioThread->isRunning()) {
+        return;
+    }
+    ui->playLocalAecTestToneButton->setEnabled(false);
+    ui->verifyLocalAecEffectButton->setEnabled(false);
+    ui->verifyLocalAecEffectButton->setText(QStringLiteral("正在验证 AEC 效果…"));
+    emit requestVerifyLocalAecEffect();
+}
+
+void MainWindow::onLocalAecTestToneStateChanged(bool active)
+{
+    if (m_shuttingDown || !ui || !ui->playLocalAecTestToneButton) {
+        return;
+    }
+    if (!active) {
+        ui->playLocalAecTestToneButton->setText(QStringLiteral("校准 AEC 延时（10 秒）"));
+    }
+    ui->playLocalAecTestToneButton->setEnabled(!active && m_audioRunning);
+    ui->verifyLocalAecEffectButton->setEnabled(!active && m_audioRunning);
+}
+
+void MainWindow::onLocalAecDelayCalibrated(int delayMs,
+                                            double correlation,
+                                            double captureRmsDbfs)
+{
+    if (m_shuttingDown || !m_audioRunning) {
+        return;
+    }
+    const QString message = QStringLiteral(
+        "音频：AEC 本机声学延时已校准为 %1 ms（相关性 %2，麦克风 %3 dBFS）。")
+                                .arg(delayMs)
+                                .arg(correlation, 0, 'f', 2)
+                                .arg(captureRmsDbfs, 0, 'f', 1);
+    setAudioStatus(message,
+                   QStringLiteral("下一帧起使用该 streamDelay；单实例 UDP 回环包仍会被丢弃。"),
+                   message);
+}
+
+void MainWindow::onLocalAecDelayCalibrationFailed(const QString &reason)
+{
+    if (m_shuttingDown || !m_audioRunning) {
+        return;
+    }
+    setAudioStatus(QStringLiteral("音频：AEC 延时校准未更新。"), reason, reason);
+}
+
+void MainWindow::onLocalAecEffectVerificationStateChanged(bool active)
+{
+    if (m_shuttingDown || !ui || !ui->verifyLocalAecEffectButton) {
+        return;
+    }
+    ui->verifyLocalAecEffectButton->setText(
+        active ? QStringLiteral("正在验证 AEC 效果…")
+               : QStringLiteral("验证 AEC 效果（10 秒）"));
+    ui->verifyLocalAecEffectButton->setEnabled(!active && m_audioRunning);
+}
+
+void MainWindow::onLocalAecEffectVerified(int measuredDelayMs,
+                                           double echoReductionDb,
+                                           double rawEchoRmsDbfs,
+                                           double processedEchoRmsDbfs,
+                                           double rawCorrelation,
+                                           double processedCorrelation)
+{
+    if (m_shuttingDown || !m_audioRunning) {
+        return;
+    }
+    const QString message = QStringLiteral(
+        "音频：AEC 本机验证完成｜相关回声 %1 → %2 dBFS，降低 %3 dB。")
+                                .arg(rawEchoRmsDbfs, 0, 'f', 1)
+                                .arg(processedEchoRmsDbfs, 0, 'f', 1)
+                                .arg(echoReductionDb, 0, 'f', 1);
+    const QString details = QStringLiteral(
+        "物理声学延时：%1 ms\n相关性：%2 → %3\n"
+        "此结果来自固定扬声器测试音在 ProcessStream 前后的对比；"
+        "麦克风 PCM 未发送、未播放，单实例 UDP 回环仍保持丢弃。")
+                                .arg(measuredDelayMs)
+                                .arg(rawCorrelation, 0, 'f', 2)
+                                .arg(processedCorrelation, 0, 'f', 2);
+    setAudioStatus(message,
+                   QStringLiteral("数值越大越好；正值表示 AEC 降低了与扬声器参考相关的回声。"),
+                   details);
+}
+
+void MainWindow::onLocalAecEffectVerificationFailed(const QString &reason)
+{
+    if (m_shuttingDown || !m_audioRunning) {
+        return;
+    }
+    ui->playLocalAecTestToneButton->setEnabled(true);
+    ui->verifyLocalAecEffectButton->setEnabled(true);
+    ui->verifyLocalAecEffectButton->setText(QStringLiteral("验证 AEC 效果（10 秒）"));
+    setAudioStatus(QStringLiteral("音频：AEC 本机效果验证未完成。"), reason, reason);
 }
 
 void MainWindow::onUdpFrameReceived(const QByteArray &encodedFrame,
@@ -1155,6 +1358,27 @@ void MainWindow::setAudioStatus(const QString &primaryText,
                      : QLatin1Char('\n') + m_audioSecondaryStatusText)
         : details;
     refreshAudioStatusText();
+}
+
+void MainWindow::setPlaybackVolumeDisplay(int rmsPercent, double rmsDbfs)
+{
+    if (!ui || !ui->playbackVolumeProgressBar || !ui->playbackVolumeValueLabel) {
+        return;
+    }
+
+    const int clampedPercent = qBound(0, rmsPercent, 100);
+    ui->playbackVolumeProgressBar->setValue(clampedPercent);
+    if (rmsDbfs <= -95.9) {
+        ui->playbackVolumeValueLabel->setText(QStringLiteral("静音（≤ -96 dBFS）"));
+    } else {
+        ui->playbackVolumeValueLabel->setText(
+            QStringLiteral("%1% / %2 dBFS").arg(clampedPercent).arg(rmsDbfs, 0, 'f', 1));
+    }
+    const QString tooltip = QStringLiteral(
+        "过去约 100 ms 内成功写入 QAudioSink 的 PCM RMS 电平。"
+        "它反映数字播放样本幅度，不包含系统音量、功放或扬声器的物理声压影响。");
+    ui->playbackVolumeProgressBar->setToolTip(tooltip);
+    ui->playbackVolumeValueLabel->setToolTip(tooltip);
 }
 
 void MainWindow::refreshAudioStatusText()

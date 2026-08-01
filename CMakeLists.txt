@@ -14,6 +14,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(VIDEO_CALL_ENABLE_ASAN "Enable AddressSanitizer for MSVC builds" OFF)
+option(VIDEO_CALL_BUILD_AUDIO_CALIBRATION_TOOL
+    "Build the manual default-device acoustic delay/AEC verification tool" OFF)
 
 if(VIDEO_CALL_ENABLE_ASAN AND MSVC)
     # MSVC AddressSanitizer is incompatible with Edit-and-Continue and runtime checks.
@@ -50,6 +52,117 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS
     Network
     Multimedia
 )
+
+# WebRTC is intentionally optional at configure time so the existing UDP/Qt
+# application and its tests remain buildable on developer machines that do not
+# have a local APM build.  When configured, only the standalone APM is linked;
+# no WebRTC media or networking stack is used by this project.
+option(VIDEO_CALL_ENABLE_WEBRTC_APM "Enable local WebRTC Audio Processing Module support" ON)
+set(VIDEO_CALL_WEBRTC_APM_ROOT "" CACHE PATH
+    "WebRTC source/install root containing api/audio/audio_processing.h and its library")
+set(VIDEO_CALL_WEBRTC_APM_TARGET "" CACHE STRING
+    "Existing CMake target that exports the complete WebRTC APM dependency closure")
+
+# A locally built WebRTC checkout keeps static libraries in out/<configuration>/obj.
+# Match Qt's Debug configuration to a Debug WebRTC library (/MDd), while all other
+# single-config build types use the Release library (/MD).  Keeping the two cache
+# entries separate also prevents CMake from reusing a Release library after a
+# build directory is reconfigured as Debug.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(VIDEO_CALL_WEBRTC_APM_LOCAL_CONFIG "Debug")
+else()
+    set(VIDEO_CALL_WEBRTC_APM_LOCAL_CONFIG "Release")
+endif()
+set(VIDEO_CALL_WEBRTC_APM_LOCAL_LIBRARY_CACHE_KEY
+    "VIDEO_CALL_WEBRTC_APM_LIBRARY_${VIDEO_CALL_WEBRTC_APM_LOCAL_CONFIG}")
+
+set(VIDEO_CALL_WEBRTC_APM_LINK_TARGET "")
+set(VIDEO_CALL_WEBRTC_APM_USES_LOCAL_STATIC_LIBRARY OFF)
+if(VIDEO_CALL_ENABLE_WEBRTC_APM)
+    if(VIDEO_CALL_WEBRTC_APM_TARGET)
+        if(TARGET ${VIDEO_CALL_WEBRTC_APM_TARGET})
+            set(VIDEO_CALL_WEBRTC_APM_LINK_TARGET ${VIDEO_CALL_WEBRTC_APM_TARGET})
+        else()
+            message(WARNING
+                "VIDEO_CALL_WEBRTC_APM_TARGET='${VIDEO_CALL_WEBRTC_APM_TARGET}' is not a CMake target; "
+                "WebRTC APM will remain disabled.")
+        endif()
+    else()
+        find_package(WebRTC CONFIG QUIET)
+        foreach(webrtc_candidate IN ITEMS WebRTC::webrtc webrtc::webrtc webrtc libwebrtc)
+            if(TARGET ${webrtc_candidate})
+                set(VIDEO_CALL_WEBRTC_APM_LINK_TARGET ${webrtc_candidate})
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    if(NOT VIDEO_CALL_WEBRTC_APM_LINK_TARGET AND VIDEO_CALL_WEBRTC_APM_ROOT)
+        find_path(VIDEO_CALL_WEBRTC_APM_INCLUDE_DIR
+            NAMES api/audio/audio_processing.h
+            PATHS "${VIDEO_CALL_WEBRTC_APM_ROOT}"
+            PATH_SUFFIXES "" include src
+            NO_DEFAULT_PATH)
+        find_library(${VIDEO_CALL_WEBRTC_APM_LOCAL_LIBRARY_CACHE_KEY}
+            NAMES webrtc webrtc_apm libwebrtc
+            PATHS "${VIDEO_CALL_WEBRTC_APM_ROOT}"
+            PATH_SUFFIXES lib lib64
+                "out/${VIDEO_CALL_WEBRTC_APM_LOCAL_CONFIG}"
+                "out/${VIDEO_CALL_WEBRTC_APM_LOCAL_CONFIG}/obj"
+            NO_DEFAULT_PATH)
+        set(VIDEO_CALL_WEBRTC_APM_LOCAL_LIBRARY
+            "${${VIDEO_CALL_WEBRTC_APM_LOCAL_LIBRARY_CACHE_KEY}}")
+        if(VIDEO_CALL_WEBRTC_APM_INCLUDE_DIR AND VIDEO_CALL_WEBRTC_APM_LOCAL_LIBRARY)
+            add_library(video_call_webrtc_apm UNKNOWN IMPORTED)
+            set_target_properties(video_call_webrtc_apm PROPERTIES
+                IMPORTED_LOCATION "${VIDEO_CALL_WEBRTC_APM_LOCAL_LIBRARY}"
+                # The current public APM headers include Abseil headers and
+                # use std::span.  Expose only these consumer-facing include
+                # paths; WebRTC's internal libc++ headers must not leak into
+                # this MSVC/Qt build.
+                INTERFACE_INCLUDE_DIRECTORIES
+                    "${VIDEO_CALL_WEBRTC_APM_INCLUDE_DIR};${VIDEO_CALL_WEBRTC_APM_INCLUDE_DIR}/third_party/abseil-cpp"
+                INTERFACE_COMPILE_FEATURES cxx_std_20
+                # WebRTC's Windows task queue uses multimedia timer APIs.
+                INTERFACE_LINK_LIBRARIES "$<$<PLATFORM_ID:Windows>:winmm>")
+            set(VIDEO_CALL_WEBRTC_APM_LINK_TARGET video_call_webrtc_apm)
+            set(VIDEO_CALL_WEBRTC_APM_USES_LOCAL_STATIC_LIBRARY ON)
+        else()
+            message(WARNING
+                "VIDEO_CALL_WEBRTC_APM_ROOT does not contain both the current WebRTC APM header "
+                "(api/audio/audio_processing.h) and a ${VIDEO_CALL_WEBRTC_APM_LOCAL_CONFIG} WebRTC library. "
+                "WebRTC APM will remain disabled.")
+        endif()
+    endif()
+endif()
+
+# /fsanitize=address changes MSVC STL container annotations.  A normal local
+# GN-built webrtc.lib does not carry the matching ASan instrumentation, so
+# allowing this combination to reach the linker produces hundreds of opaque
+# LNK2038 mismatches.  A separately packaged, fully ASan-built WebRTC target
+# can still be supplied through VIDEO_CALL_WEBRTC_APM_TARGET.
+if(VIDEO_CALL_ENABLE_ASAN AND VIDEO_CALL_WEBRTC_APM_USES_LOCAL_STATIC_LIBRARY)
+    message(FATAL_ERROR
+        "VIDEO_CALL_ENABLE_ASAN=ON is incompatible with the local static WebRTC library. "
+        "Use VIDEO_CALL_ENABLE_ASAN=OFF for AEC3 debugging, or provide an ASan-built "
+        "dependency closure through VIDEO_CALL_WEBRTC_APM_TARGET.")
+endif()
+
+if(VIDEO_CALL_WEBRTC_APM_LINK_TARGET)
+    set(VIDEO_CALL_WEBRTC_APM_ENABLED ON)
+    message(STATUS "WebRTC APM enabled through target: ${VIDEO_CALL_WEBRTC_APM_LINK_TARGET}")
+else()
+    set(VIDEO_CALL_WEBRTC_APM_ENABLED OFF)
+    message(STATUS
+        "WebRTC APM disabled: set VIDEO_CALL_WEBRTC_APM_ROOT or VIDEO_CALL_WEBRTC_APM_TARGET to enable AEC3.")
+endif()
+
+function(video_call_link_webrtc_apm target)
+    if(VIDEO_CALL_WEBRTC_APM_ENABLED)
+        target_link_libraries(${target} PRIVATE ${VIDEO_CALL_WEBRTC_APM_LINK_TARGET})
+        target_compile_definitions(${target} PRIVATE VIDEO_CALL_HAVE_WEBRTC_APM=1)
+    endif()
+endfunction()
 
 if(NOT DEFINED OpenCV_DIR)
     set(OpenCV_DIR
@@ -181,10 +294,14 @@ set(PROJECT_SOURCES
         jpegframedecoder.h
         audiopacketprotocol.cpp
         audiopacketprotocol.h
+        acousticdelayestimator.cpp
+        acousticdelayestimator.h
         audiojitterbuffer.cpp
         audiojitterbuffer.h
         audioudptransport.cpp
         audioudptransport.h
+        webrtcaudioprocessor.cpp
+        webrtcaudioprocessor.h
         audioworker.cpp
         audioworker.h
         remotevideodecoder.cpp
@@ -230,6 +347,7 @@ target_link_libraries(video_call PRIVATE
     Qt${QT_VERSION_MAJOR}::Multimedia
     ${VIDEO_CALL_OPENCV_TARGETS}
 )
+video_call_link_webrtc_apm(video_call)
 
 if(WIN32)
     foreach(runtime_target IN LISTS VIDEO_CALL_QT_RUNTIME_TARGETS VIDEO_CALL_OPENCV_TARGETS)
@@ -424,6 +542,60 @@ if(BUILD_TESTING)
         COMMAND audio_udp_transport_test
     )
 
+    add_executable(audio_loop_policy_test
+        tests/audiolooppolicy_test.cpp
+        audiolooppolicy.h
+    )
+
+    target_link_libraries(audio_loop_policy_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+        Qt${QT_VERSION_MAJOR}::Network
+    )
+
+    target_include_directories(audio_loop_policy_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+
+    add_test(
+        NAME audio_loop_policy_test
+        COMMAND audio_loop_policy_test
+    )
+
+    add_executable(webrtc_audio_processor_test
+        tests/webrtcaudioprocessor_test.cpp
+        webrtcaudioprocessor.cpp
+        webrtcaudioprocessor.h
+    )
+
+    target_link_libraries(webrtc_audio_processor_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+    )
+    target_include_directories(webrtc_audio_processor_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    video_call_link_webrtc_apm(webrtc_audio_processor_test)
+
+    add_test(
+        NAME webrtc_audio_processor_test
+        COMMAND webrtc_audio_processor_test
+    )
+
+    add_executable(acoustic_delay_estimator_test
+        tests/acousticdelayestimator_test.cpp
+        acousticdelayestimator.cpp
+        acousticdelayestimator.h
+    )
+    target_link_libraries(acoustic_delay_estimator_test PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+    )
+    target_include_directories(acoustic_delay_estimator_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(
+        NAME acoustic_delay_estimator_test
+        COMMAND acoustic_delay_estimator_test
+    )
+
     add_executable(video_frame_rate_utils_test
         tests/videoframerateutils_test.cpp
         videoframerateutils.cpp
@@ -458,6 +630,7 @@ if(BUILD_TESTING)
         Qt${QT_VERSION_MAJOR}::Multimedia
         ${VIDEO_CALL_OPENCV_TARGETS}
     )
+    video_call_link_webrtc_apm(mainwindow_exit_smoke_test)
 
     target_include_directories(mainwindow_exit_smoke_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -487,9 +660,43 @@ if(BUILD_TESTING)
         audio_packet_protocol_test
         audio_jitter_buffer_test
         audio_udp_transport_test
+        audio_loop_policy_test
+        webrtc_audio_processor_test
+        acoustic_delay_estimator_test
         video_frame_rate_utils_test
         mainwindow_exit_smoke_test
     )
+endif()
+
+if(VIDEO_CALL_BUILD_AUDIO_CALIBRATION_TOOL)
+    # This intentionally is not a CTest: it plays a low-level test signal
+    # through the user's real default speaker and records their microphone.
+    add_executable(audio_acoustic_calibration_tool
+        tests/audio_acoustic_calibration_tool.cpp
+        audiopacketprotocol.cpp
+        audiopacketprotocol.h
+        acousticdelayestimator.cpp
+        acousticdelayestimator.h
+        audiojitterbuffer.cpp
+        audiojitterbuffer.h
+        audioudptransport.cpp
+        audioudptransport.h
+        webrtcaudioprocessor.cpp
+        webrtcaudioprocessor.h
+        audioworker.cpp
+        audioworker.h
+    )
+    target_link_libraries(audio_acoustic_calibration_tool PRIVATE
+        Qt${QT_VERSION_MAJOR}::Core
+        Qt${QT_VERSION_MAJOR}::Gui
+        Qt${QT_VERSION_MAJOR}::Network
+        Qt${QT_VERSION_MAJOR}::Multimedia
+    )
+    target_include_directories(audio_acoustic_calibration_tool PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    video_call_link_webrtc_apm(audio_acoustic_calibration_tool)
+    video_call_configure_target(audio_acoustic_calibration_tool)
 endif()
 
 video_call_configure_target(video_call)

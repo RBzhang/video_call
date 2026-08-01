@@ -815,7 +815,33 @@ border-top: 1px solid rgb(190, 190, 190);</string>
          </property>
         </widget>
        </item>
-       <item row="2" column="0" colspan="4">
+       <item row="2" column="0" colspan="2">
+        <widget class="QPushButton" name="playLocalAecTestToneButton">
+         <property name="enabled">
+          <bool>false</bool>
+         </property>
+         <property name="toolTip">
+          <string>播放固定 300–3000 Hz 扫频信号并采集麦克风，自动估算 0–500 ms 的本机声学延时。测试期间跳过网络播放和发送，且同一实例返回的 UDP 包会被永久丢弃，防止扬声器-麦克风自激。</string>
+         </property>
+         <property name="text">
+          <string>校准 AEC 延时（10 秒）</string>
+         </property>
+        </widget>
+       </item>
+       <item row="2" column="2" colspan="2">
+        <widget class="QPushButton" name="verifyLocalAecEffectButton">
+         <property name="enabled">
+          <bool>false</bool>
+         </property>
+         <property name="toolTip">
+          <string>播放固定扬声器参考音，同时采集真实麦克风输入并送入 WebRTC AEC3。界面将显示处理前后与参考音相关的残余回声变化；麦克风 PCM 不会发送到 UDP，也不会回放到扬声器。</string>
+         </property>
+         <property name="text">
+          <string>验证 AEC 效果（10 秒）</string>
+         </property>
+        </widget>
+       </item>
+       <item row="3" column="0" colspan="4">
         <widget class="QFrame" name="audioStatusPanel">
          <property name="minimumSize">
           <size>
@@ -926,10 +952,49 @@ border-top: 1px solid rgb(190, 190, 190);</string>
          </layout>
         </widget>
        </item>
-       <item row="3" column="0" colspan="4">
+       <item row="4" column="0">
+        <widget class="QLabel" name="playbackVolumeTextLabel">
+         <property name="text">
+          <string>实际播放音量：</string>
+         </property>
+        </widget>
+       </item>
+       <item row="4" column="1" colspan="2">
+        <widget class="QProgressBar" name="playbackVolumeProgressBar">
+         <property name="minimumSize">
+          <size>
+           <width>160</width>
+           <height>0</height>
+          </size>
+         </property>
+         <property name="maximum">
+          <number>100</number>
+         </property>
+         <property name="value">
+          <number>0</number>
+         </property>
+         <property name="textVisible">
+          <bool>false</bool>
+         </property>
+        </widget>
+       </item>
+       <item row="4" column="3">
+        <widget class="QLabel" name="playbackVolumeValueLabel">
+         <property name="minimumSize">
+          <size>
+           <width>120</width>
+           <height>0</height>
+          </size>
+         </property>
+         <property name="text">
+          <string>静音（≤ -96 dBFS）</string>
+         </property>
+        </widget>
+       </item>
+       <item row="5" column="0" colspan="4">
         <widget class="QLabel" name="audioHintLabel">
          <property name="text">
-          <string>建议使用耳机，当前未实现回声消除。</string>
+          <string>建议先用笔记本内置麦克风和扬声器测试 AEC；耳机模式也可正常使用。</string>
          </property>
          <property name="sizePolicy">
           <sizepolicy hsizetype="Expanding" vsizetype="Fixed">

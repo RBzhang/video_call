@@ -1,5 +1,6 @@
 #include "audioworker.h"
 
+#include "audiolooppolicy.h"
 #include "audiopacketprotocol.h"
 #include "audioudptransport.h"
 
@@ -17,6 +18,9 @@
 #include <QThread>
 
 #include <atomic>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 
 namespace {
 
@@ -24,6 +28,18 @@ constexpr int AudioPacketIntervalMs = 20;
 constexpr qsizetype CaptureBufferLimit = AudioPacketProtocol::PcmPayloadSize * 10;
 constexpr qsizetype PlaybackBufferLimit = AudioPacketProtocol::PcmPayloadSize * 5;
 constexpr qsizetype RequestedSinkBufferSize = AudioPacketProtocol::PcmPayloadSize * 4;
+constexpr int DefaultAecStreamDelayMs = WebRtcAudioProcessor::DefaultAecStreamDelayMs;
+constexpr int PlaybackVolumeUpdateIntervalMs = 100;
+constexpr double Int16FullScale = 32768.0;
+constexpr double SilenceDbfs = -96.0;
+constexpr int LocalAecTestDurationMs = 10000;
+constexpr int LocalAecTestPacketCount = LocalAecTestDurationMs / AudioPacketIntervalMs;
+constexpr int LocalAecTestPostRollMs = 500;
+constexpr int LocalAecTestPostRollPacketCount = LocalAecTestPostRollMs / AudioPacketIntervalMs;
+constexpr double LocalAecTestAmplitude = 0.12 * 32767.0; // About -21 dBFS RMS.
+constexpr double LocalAecTestSweepStartHz = 300.0;
+constexpr double LocalAecTestSweepEndHz = 3000.0;
+constexpr double TwoPi = 6.28318530717958647692;
 
 QAudioFormat fixedAudioFormat()
 {
@@ -158,6 +174,10 @@ void AudioWorker::startAudio()
         return;
     }
 
+    // Failure is non-fatal: WebRtcAudioProcessor safely returns original PCM
+    // until a local WebRTC APM library is configured and initialized.
+    m_audioProcessor.initialize();
+
     m_inputDeviceDescription = inputDevice.description();
     m_outputDeviceDescription = outputDevice.description();
     m_audioSource = new QAudioSource(inputDevice, format, this);
@@ -191,16 +211,30 @@ void AudioWorker::startAudio()
     m_sinkBufferSize = m_audioSink->bufferSize();
     m_captureBuffer.clear();
     m_playbackBuffer.clear();
+    resetPlaybackVolume();
     m_jitterBuffer.clear();
     m_jitterBuffer.resetStatistics();
     m_sendSessionId = QRandomGenerator::global()->generate();
     m_sendSessionId = nextNonZero(m_sendSessionId);
     m_nextSequence = 1;
     m_nextTimestampSamples = 0;
+    m_aecStreamDelayMs = DefaultAecStreamDelayMs;
+    m_localAecTestActive = false;
+    m_localAecEffectVerificationActive = false;
+    m_localAecTestPacketsRemaining = 0;
+    m_localAecTestPostRollPacketsRemaining = 0;
+    m_localAecTestSamplePosition = 0;
+    m_localAecTestElapsedTimer.invalidate();
+    m_localAecTestRenderStartElapsedMs = -1;
+    m_localAecTestCaptureStartElapsedMs = -1;
+    m_localAecTestRenderPcm.clear();
+    m_localAecTestCapturePcm.clear();
+    m_localAecTestProcessedCapturePcm.clear();
     resetIntervalStatistics();
     ensureTimers();
     m_statisticsElapsedTimer.restart();
     m_playoutTimer->start(AudioPacketIntervalMs);
+    m_playbackVolumeTimer->start(PlaybackVolumeUpdateIntervalMs);
     m_statisticsTimer->start(1000);
     m_running = true;
 
@@ -220,6 +254,57 @@ void AudioWorker::stopAudio()
     stopAudioInternal(true);
 }
 
+void AudioWorker::playLocalAecTestTone()
+{
+    startLocalAecTest(false);
+}
+
+void AudioWorker::verifyLocalAecEffect()
+{
+    if (!m_running || !m_outputDevice || m_localAecTestActive) {
+        return;
+    }
+
+    if (!m_audioProcessor.isInitialized()) {
+        emit localAecEffectVerificationFailed(
+            QStringLiteral("WebRTC APM/AEC3 未初始化，无法验证回声消除效果。"));
+        return;
+    }
+
+    startLocalAecTest(true);
+}
+
+void AudioWorker::startLocalAecTest(bool verifyEffect)
+{
+    if (!m_running || !m_outputDevice || m_localAecTestActive) {
+        return;
+    }
+
+    // The test source replaces network playout for its fixed 10 s duration.
+    // Self-looped microphone packets are discarded in onAudioPacketReceived()
+    // so a failed AEC setup cannot turn this diagnostic signal into feedback.
+    m_jitterBuffer.clear();
+    m_playbackBuffer.clear();
+    m_captureBuffer.clear();
+    resetPlaybackVolume();
+    m_audioProcessor.reset();
+    m_localAecTestActive = true;
+    m_localAecEffectVerificationActive = verifyEffect;
+    m_localAecTestPacketsRemaining = LocalAecTestPacketCount;
+    m_localAecTestPostRollPacketsRemaining = LocalAecTestPostRollPacketCount;
+    m_localAecTestSamplePosition = 0;
+    m_localAecTestElapsedTimer.start();
+    m_localAecTestRenderStartElapsedMs = -1;
+    m_localAecTestCaptureStartElapsedMs = -1;
+    m_localAecTestRenderPcm.clear();
+    m_localAecTestCapturePcm.clear();
+    m_localAecTestProcessedCapturePcm.clear();
+    emit localAecTestToneStateChanged(true);
+    if (verifyEffect) {
+        emit localAecEffectVerificationStateChanged(true);
+    }
+}
+
 void AudioWorker::shutdown()
 {
     if (m_shutdown) {
@@ -229,6 +314,9 @@ void AudioWorker::shutdown()
     stopAudioInternal(false);
     if (m_playoutTimer) {
         m_playoutTimer->stop();
+    }
+    if (m_playbackVolumeTimer) {
+        m_playbackVolumeTimer->stop();
     }
     if (m_statisticsTimer) {
         m_statisticsTimer->stop();
@@ -261,14 +349,24 @@ void AudioWorker::onInputReadyRead()
     while (m_captureBuffer.size() >= AudioPacketProtocol::PcmPayloadSize) {
         const QByteArray payload = m_captureBuffer.first(AudioPacketProtocol::PcmPayloadSize);
         m_captureBuffer.remove(0, AudioPacketProtocol::PcmPayloadSize);
+        if (m_localAecTestActive) {
+            // Do not send diagnostic capture back through UDP.  Besides
+            // preventing acoustic feedback, this keeps the measurement free
+            // from a second render path with an unknown network delay.
+            collectLocalAecTestCapture(payload);
+            continue;
+        }
+
+        const QByteArray processedPayload = m_audioProcessor.processCapture20Ms(
+            payload, m_aecStreamDelayMs);
         QString sendError;
-        if (m_transport->sendAudioPayload(payload,
+        if (m_transport->sendAudioPayload(processedPayload,
                                           m_sendSessionId,
                                           m_nextSequence,
                                           m_nextTimestampSamples,
                                           &sendError)) {
             ++m_sentPacketsInterval;
-            m_sentBytesInterval += static_cast<quint64>(payload.size());
+            m_sentBytesInterval += static_cast<quint64>(processedPayload.size());
         } else {
             reportError(QStringLiteral("发送 PCM 音频包失败：%1").arg(sendError));
         }
@@ -285,10 +383,23 @@ void AudioWorker::onAudioPacketReceived(const QByteArray &pcmPayload,
                                         quint16 senderPort)
 {
     Q_UNUSED(timestampSamples);
-    Q_UNUSED(senderAddress);
-    Q_UNUSED(senderPort);
 
     if (!m_running) {
+        return;
+    }
+    const bool isSoftwareSelfLoopback = m_transport
+        && AudioLoopPolicy::isSoftwareSelfLoopback(senderAddress,
+                                                    senderPort,
+                                                    m_transport->localAddress(),
+                                                    m_transport->localPort());
+    if (sessionId == m_sendSessionId && m_sendSessionId != 0 && isSoftwareSelfLoopback) {
+        // Reject only a packet returned by this very UDP endpoint.  An FPGA
+        // reflector preserves the ACL1 session id, but returns the packet
+        // from its own configured peer endpoint and must be rendered.
+        ++m_localLoopbackPackets;
+        return;
+    }
+    if (m_localAecTestActive) {
         return;
     }
     ++m_receivedPacketsInterval;
@@ -339,9 +450,21 @@ void AudioWorker::onPlayoutTimer()
         return;
     }
 
-    const QByteArray packet = m_jitterBuffer.takeNextPacket();
+    QByteArray packet;
+    if (m_localAecTestActive && m_localAecTestPacketsRemaining > 0) {
+        packet = nextLocalAecTestPacket();
+        --m_localAecTestPacketsRemaining;
+        if (m_localAecTestRenderPcm.isEmpty() && m_localAecTestElapsedTimer.isValid()) {
+            m_localAecTestRenderStartElapsedMs = m_localAecTestElapsedTimer.elapsed();
+        }
+        m_localAecTestRenderPcm.append(packet);
+    } else if (!m_localAecTestActive) {
+        packet = m_jitterBuffer.takeNextPacket();
+    }
     if (!packet.isEmpty()) {
-        appendPlaybackPacket(packet);
+        // This is intentionally after jitter-buffer scheduling.  Concealment
+        // packets are valid 640-byte silence frames and become AEC references.
+        appendPlaybackPacket(m_audioProcessor.processRender20Ms(packet));
     }
     drainPlaybackBuffer();
 }
@@ -378,12 +501,42 @@ void AudioWorker::onStatisticsTimer()
     statistics.invalidPackets = m_invalidPackets;
     statistics.captureOverruns = m_captureOverruns;
     statistics.playbackOverruns = m_playbackOverruns;
+    const WebRtcAudioProcessor::Statistics processorStatistics = m_audioProcessor.statistics();
+    statistics.aecBackendAvailable = processorStatistics.backendAvailable;
+    statistics.aecInitialized = processorStatistics.initialized;
+    statistics.aecEnabled = processorStatistics.aecEnabled;
+    statistics.aecStreamDelayMs = m_aecStreamDelayMs;
+    statistics.aecRenderProcessFailures = processorStatistics.renderProcessFailures;
+    statistics.aecCaptureProcessFailures = processorStatistics.captureProcessFailures;
+    statistics.aecBypassedFrames = processorStatistics.bypassedFrames;
+    statistics.localLoopbackPackets = m_localLoopbackPackets;
     statistics.inputDeviceDescription = m_inputDeviceDescription;
     statistics.outputDeviceDescription = m_outputDeviceDescription;
     statistics.sourceBufferSize = m_sourceBufferSize;
     statistics.sinkBufferSize = m_sinkBufferSize;
     emit audioStatisticsUpdated(statistics);
     resetIntervalStatistics();
+}
+
+void AudioWorker::onPlaybackVolumeTimer()
+{
+    if (!m_running) {
+        return;
+    }
+
+    double normalizedRms = 0.0;
+    if (m_playbackVolumeSampleCount > 0) {
+        normalizedRms = std::sqrt(m_playbackVolumeSumSquares
+                                  / static_cast<double>(m_playbackVolumeSampleCount))
+            / Int16FullScale;
+    }
+    normalizedRms = std::clamp(normalizedRms, 0.0, 1.0);
+    const int rmsPercent = qRound(normalizedRms * 100.0);
+    const double rmsDbfs = normalizedRms > 0.0
+        ? std::max(SilenceDbfs, 20.0 * std::log10(normalizedRms))
+        : SilenceDbfs;
+    resetPlaybackVolume();
+    emit playbackVolumeUpdated(rmsPercent, rmsDbfs);
 }
 
 quint32 AudioWorker::nextNonZero(quint32 value)
@@ -438,6 +591,9 @@ void AudioWorker::stopAudioInternal(bool emitStoppedSignal)
     if (m_playoutTimer) {
         m_playoutTimer->stop();
     }
+    if (m_playbackVolumeTimer) {
+        m_playbackVolumeTimer->stop();
+    }
     if (m_inputDevice) {
         disconnect(m_inputDevice, &QIODevice::readyRead, this, &AudioWorker::onInputReadyRead);
     }
@@ -455,7 +611,28 @@ void AudioWorker::stopAudioInternal(bool emitStoppedSignal)
     }
     m_captureBuffer.clear();
     m_playbackBuffer.clear();
+    resetPlaybackVolume();
     m_jitterBuffer.clear();
+    const bool wasLocalAecTestActive = m_localAecTestActive;
+    const bool wasLocalAecEffectVerificationActive = m_localAecEffectVerificationActive;
+    m_localAecTestActive = false;
+    m_localAecEffectVerificationActive = false;
+    m_localAecTestPacketsRemaining = 0;
+    m_localAecTestPostRollPacketsRemaining = 0;
+    m_localAecTestSamplePosition = 0;
+    m_localAecTestElapsedTimer.invalidate();
+    m_localAecTestRenderStartElapsedMs = -1;
+    m_localAecTestCaptureStartElapsedMs = -1;
+    m_localAecTestRenderPcm.clear();
+    m_localAecTestCapturePcm.clear();
+    m_localAecTestProcessedCapturePcm.clear();
+    if (wasLocalAecTestActive) {
+        emit localAecTestToneStateChanged(false);
+    }
+    if (wasLocalAecEffectVerificationActive) {
+        emit localAecEffectVerificationStateChanged(false);
+    }
+    m_audioProcessor.shutdown();
     m_sendSessionId = 0;
     m_nextSequence = 1;
     m_nextTimestampSamples = 0;
@@ -494,8 +671,183 @@ void AudioWorker::drainPlaybackBuffer()
         return;
     }
     if (written > 0) {
+        accumulatePlaybackVolume(m_playbackBuffer, static_cast<qsizetype>(written));
         m_playbackBuffer.remove(0, written);
     }
+}
+
+void AudioWorker::accumulatePlaybackVolume(const QByteArray &pcm, qsizetype byteCount)
+{
+    const qsizetype availableBytes = qMin(byteCount, pcm.size());
+    const qsizetype sampleBytes = availableBytes - (availableBytes % sizeof(qint16));
+    for (qsizetype offset = 0; offset < sampleBytes; offset += sizeof(qint16)) {
+        qint16 sample = 0;
+        // QByteArray is byte-aligned; copy before interpreting samples so a
+        // partial QAudioSink write cannot cause an unaligned int16 access.
+        std::memcpy(&sample, pcm.constData() + offset, sizeof(sample));
+        const double sampleValue = static_cast<double>(sample);
+        m_playbackVolumeSumSquares += sampleValue * sampleValue;
+        ++m_playbackVolumeSampleCount;
+    }
+}
+
+void AudioWorker::resetPlaybackVolume()
+{
+    m_playbackVolumeSampleCount = 0;
+    m_playbackVolumeSumSquares = 0.0;
+}
+
+void AudioWorker::collectLocalAecTestCapture(const QByteArray &packet)
+{
+    if (packet.size() != AudioPacketProtocol::PcmPayloadSize) {
+        return;
+    }
+
+    // Do not use capture that predates the first known render frame.  The
+    // capture tail is kept for 500 ms after the final render frame so every
+    // candidate 0–500 ms delay has matching microphone samples.
+    if (!m_localAecTestRenderPcm.isEmpty()) {
+        if (m_localAecTestCapturePcm.isEmpty() && m_localAecTestElapsedTimer.isValid()) {
+            m_localAecTestCaptureStartElapsedMs = m_localAecTestElapsedTimer.elapsed();
+        }
+        m_localAecTestCapturePcm.append(packet);
+        if (m_localAecEffectVerificationActive) {
+            // This invokes ProcessStream() with the same microphone PCM that
+            // a call would send, but the resulting PCM is recorded only for
+            // comparison and never sent or played locally.
+            m_localAecTestProcessedCapturePcm.append(
+                m_audioProcessor.processCapture20Ms(packet, m_aecStreamDelayMs));
+        }
+    }
+    if (m_localAecTestPacketsRemaining == 0 && m_localAecTestPostRollPacketsRemaining > 0) {
+        --m_localAecTestPostRollPacketsRemaining;
+        if (m_localAecTestPostRollPacketsRemaining == 0) {
+            finishLocalAecTest();
+        }
+    }
+}
+
+void AudioWorker::finishLocalAecTest()
+{
+    if (!m_localAecTestActive) {
+        return;
+    }
+
+    const qint64 captureStartOffsetMs = m_localAecTestCaptureStartElapsedMs >= 0
+        && m_localAecTestRenderStartElapsedMs >= 0
+        ? m_localAecTestCaptureStartElapsedMs - m_localAecTestRenderStartElapsedMs
+        : 0;
+    const AcousticDelayEstimator::Result result = AcousticDelayEstimator::estimate(
+        m_localAecTestRenderPcm, m_localAecTestCapturePcm, captureStartOffsetMs);
+    const bool wasLocalAecEffectVerificationActive = m_localAecEffectVerificationActive;
+    const QByteArray renderPcm = m_localAecTestRenderPcm;
+    const QByteArray rawCapturePcm = m_localAecTestCapturePcm;
+    const QByteArray processedCapturePcm = m_localAecTestProcessedCapturePcm;
+    m_localAecTestActive = false;
+    m_localAecEffectVerificationActive = false;
+    m_localAecTestPacketsRemaining = 0;
+    m_localAecTestPostRollPacketsRemaining = 0;
+    m_localAecTestSamplePosition = 0;
+    m_localAecTestElapsedTimer.invalidate();
+    m_localAecTestRenderStartElapsedMs = -1;
+    m_localAecTestCaptureStartElapsedMs = -1;
+    m_localAecTestRenderPcm.clear();
+    m_localAecTestCapturePcm.clear();
+    m_localAecTestProcessedCapturePcm.clear();
+
+    // APM collected only reverse frames during the diagnostic.  Start its
+    // normal capture/render state fresh before returning to a call.
+    m_audioProcessor.reset();
+    emit localAecTestToneStateChanged(false);
+    if (wasLocalAecEffectVerificationActive) {
+        emit localAecEffectVerificationStateChanged(false);
+        if (!result.valid) {
+            const QString reason = QStringLiteral(
+                "未检测到可信的扬声器回声，无法验证 AEC（麦克风 %1 dBFS，相关性 %2）。")
+                                       .arg(result.captureRmsDbfs, 0, 'f', 1)
+                                       .arg(result.normalizedCorrelation, 0, 'f', 2);
+            qWarning().noquote() << QStringLiteral("[AudioWorker] AEC effect verification failed:")
+                                 << reason;
+            emit localAecEffectVerificationFailed(reason);
+            return;
+        }
+
+        const AcousticDelayEstimator::EchoMetrics rawMetrics =
+            AcousticDelayEstimator::measureAtDelay(renderPcm,
+                                                   rawCapturePcm,
+                                                   captureStartOffsetMs,
+                                                   result.delayMs);
+        const AcousticDelayEstimator::EchoMetrics processedMetrics =
+            AcousticDelayEstimator::measureAtDelay(renderPcm,
+                                                   processedCapturePcm,
+                                                   captureStartOffsetMs,
+                                                   result.delayMs);
+        if (!rawMetrics.valid || !processedMetrics.valid) {
+            const QString reason = QStringLiteral("AEC 前后 PCM 长度不足，无法完成本机效果对比。");
+            qWarning().noquote() << QStringLiteral("[AudioWorker] AEC effect verification failed:")
+                                 << reason;
+            emit localAecEffectVerificationFailed(reason);
+            return;
+        }
+
+        const double echoReductionDb = rawMetrics.renderCorrelatedRmsDbfs
+            - processedMetrics.renderCorrelatedRmsDbfs;
+        qInfo().nospace() << "[AudioWorker] AEC effect verification: delay="
+                          << result.delayMs << " ms, correlated echo "
+                          << rawMetrics.renderCorrelatedRmsDbfs << " -> "
+                          << processedMetrics.renderCorrelatedRmsDbfs << " dBFS, reduction="
+                          << echoReductionDb << " dB, correlation "
+                          << rawMetrics.normalizedCorrelation << " -> "
+                          << processedMetrics.normalizedCorrelation << ".";
+        emit localAecEffectVerified(result.delayMs,
+                                    echoReductionDb,
+                                    rawMetrics.renderCorrelatedRmsDbfs,
+                                    processedMetrics.renderCorrelatedRmsDbfs,
+                                    rawMetrics.normalizedCorrelation,
+                                    processedMetrics.normalizedCorrelation);
+        return;
+    }
+    if (result.valid) {
+        m_aecStreamDelayMs = result.delayMs;
+        qInfo().nospace() << "[AudioWorker] Acoustic delay calibration: "
+                          << result.delayMs << " ms, correlation="
+                          << result.normalizedCorrelation << ", capture="
+                          << result.captureRmsDbfs << " dBFS, callbackOffset="
+                          << captureStartOffsetMs << " ms, waveformAlignment="
+                          << result.waveformAlignmentMs << " ms.";
+        emit localAecDelayCalibrated(result.delayMs,
+                                      result.normalizedCorrelation,
+                                      result.captureRmsDbfs);
+        return;
+    }
+
+    const QString reason = QStringLiteral(
+        "未检测到足够强的扬声器测试音（麦克风 %1 dBFS，相关性 %2，最佳候选 %3 ms）；延时保持 %4 ms。")
+                               .arg(result.captureRmsDbfs, 0, 'f', 1)
+                               .arg(result.normalizedCorrelation, 0, 'f', 2)
+                               .arg(result.delayMs)
+                               .arg(m_aecStreamDelayMs);
+    qWarning().noquote() << QStringLiteral("[AudioWorker] AEC delay calibration failed:") << reason;
+    emit localAecDelayCalibrationFailed(reason);
+}
+
+QByteArray AudioWorker::nextLocalAecTestPacket()
+{
+    QByteArray packet(AudioPacketProtocol::PcmPayloadSize, '\0');
+    const double sweepRangeHz = LocalAecTestSweepEndHz - LocalAecTestSweepStartHz;
+    for (int sampleIndex = 0; sampleIndex < AudioPacketProtocol::SamplesPerChannel; ++sampleIndex) {
+        const quint64 position = m_localAecTestSamplePosition++;
+        const double sweepTimeSeconds = static_cast<double>(position % AudioPacketProtocol::SampleRate)
+            / static_cast<double>(AudioPacketProtocol::SampleRate);
+        const double phase = TwoPi * (LocalAecTestSweepStartHz * sweepTimeSeconds
+                                      + 0.5 * sweepRangeHz * sweepTimeSeconds * sweepTimeSeconds);
+        const int sampleValue = static_cast<int>(std::lround(LocalAecTestAmplitude * std::sin(phase)));
+        const qint16 sample = static_cast<qint16>(std::clamp(sampleValue, -32768, 32767));
+        std::memcpy(packet.data() + sampleIndex * static_cast<int>(sizeof(sample)),
+                    &sample,
+                    sizeof(sample));
+    }
+    return packet;
 }
 
 void AudioWorker::ensureTimers()
@@ -504,6 +856,14 @@ void AudioWorker::ensureTimers()
         m_playoutTimer = new QTimer(this);
         m_playoutTimer->setTimerType(Qt::PreciseTimer);
         connect(m_playoutTimer, &QTimer::timeout, this, &AudioWorker::onPlayoutTimer);
+    }
+    if (!m_playbackVolumeTimer) {
+        m_playbackVolumeTimer = new QTimer(this);
+        m_playbackVolumeTimer->setTimerType(Qt::PreciseTimer);
+        connect(m_playbackVolumeTimer,
+                &QTimer::timeout,
+                this,
+                &AudioWorker::onPlaybackVolumeTimer);
     }
     if (!m_statisticsTimer) {
         m_statisticsTimer = new QTimer(this);

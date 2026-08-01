@@ -10,6 +10,8 @@
 #include <QtGlobal>
 
 #include "audiojitterbuffer.h"
+#include "acousticdelayestimator.h"
+#include "webrtcaudioprocessor.h"
 
 class AudioUdpTransport;
 class QAudioSink;
@@ -33,6 +35,14 @@ struct AudioStatistics
     quint64 invalidPackets = 0;
     quint64 captureOverruns = 0;
     quint64 playbackOverruns = 0;
+    quint64 localLoopbackPackets = 0;
+    bool aecBackendAvailable = false;
+    bool aecInitialized = false;
+    bool aecEnabled = false;
+    int aecStreamDelayMs = WebRtcAudioProcessor::DefaultAecStreamDelayMs;
+    quint64 aecRenderProcessFailures = 0;
+    quint64 aecCaptureProcessFailures = 0;
+    quint64 aecBypassedFrames = 0;
     QString inputDeviceDescription;
     QString outputDeviceDescription;
     qsizetype sourceBufferSize = 0;
@@ -59,6 +69,8 @@ public slots:
                           quint16 peerPort);
     void startAudio();
     void stopAudio();
+    void playLocalAecTestTone();
+    void verifyLocalAecEffect();
     void shutdown();
 
 signals:
@@ -67,6 +79,18 @@ signals:
     void audioStopped();
     void audioError(const QString &message);
     void audioStatisticsUpdated(const AudioStatistics &statistics);
+    void playbackVolumeUpdated(int rmsPercent, double rmsDbfs);
+    void localAecTestToneStateChanged(bool active);
+    void localAecDelayCalibrated(int delayMs, double correlation, double captureRmsDbfs);
+    void localAecDelayCalibrationFailed(const QString &reason);
+    void localAecEffectVerificationStateChanged(bool active);
+    void localAecEffectVerified(int measuredDelayMs,
+                                double echoReductionDb,
+                                double rawEchoRmsDbfs,
+                                double processedEchoRmsDbfs,
+                                double rawCorrelation,
+                                double processedCorrelation);
+    void localAecEffectVerificationFailed(const QString &reason);
 
 private slots:
     void onInputReadyRead();
@@ -81,6 +105,7 @@ private slots:
     void onSourceStateChanged(QtAudio::State state);
     void onSinkStateChanged(QtAudio::State state);
     void onPlayoutTimer();
+    void onPlaybackVolumeTimer();
     void onStatisticsTimer();
 
 private:
@@ -93,6 +118,12 @@ private:
     void stopAudioInternal(bool emitStoppedSignal);
     void appendPlaybackPacket(const QByteArray &packet);
     void drainPlaybackBuffer();
+    void accumulatePlaybackVolume(const QByteArray &pcm, qsizetype byteCount);
+    void resetPlaybackVolume();
+    void startLocalAecTest(bool verifyEffect);
+    QByteArray nextLocalAecTestPacket();
+    void collectLocalAecTestCapture(const QByteArray &packet);
+    void finishLocalAecTest();
     void ensureTimers();
 
     AudioUdpTransport *m_transport = nullptr;
@@ -101,8 +132,10 @@ private:
     QIODevice *m_inputDevice = nullptr;
     QIODevice *m_outputDevice = nullptr;
     QTimer *m_playoutTimer = nullptr;
+    QTimer *m_playbackVolumeTimer = nullptr;
     QTimer *m_statisticsTimer = nullptr;
     AudioJitterBuffer m_jitterBuffer;
+    WebRtcAudioProcessor m_audioProcessor;
     QElapsedTimer m_statisticsElapsedTimer;
 
     QByteArray m_captureBuffer;
@@ -127,6 +160,21 @@ private:
     quint64 m_invalidPackets = 0;
     quint64 m_captureOverruns = 0;
     quint64 m_playbackOverruns = 0;
+    quint64 m_localLoopbackPackets = 0;
+    quint64 m_playbackVolumeSampleCount = 0;
+    double m_playbackVolumeSumSquares = 0.0;
+    int m_aecStreamDelayMs = WebRtcAudioProcessor::DefaultAecStreamDelayMs;
+    bool m_localAecTestActive = false;
+    bool m_localAecEffectVerificationActive = false;
+    int m_localAecTestPacketsRemaining = 0;
+    int m_localAecTestPostRollPacketsRemaining = 0;
+    quint64 m_localAecTestSamplePosition = 0;
+    QElapsedTimer m_localAecTestElapsedTimer;
+    qint64 m_localAecTestRenderStartElapsedMs = -1;
+    qint64 m_localAecTestCaptureStartElapsedMs = -1;
+    QByteArray m_localAecTestRenderPcm;
+    QByteArray m_localAecTestCapturePcm;
+    QByteArray m_localAecTestProcessedCapturePcm;
 };
 
 #endif // AUDIOWORKER_H

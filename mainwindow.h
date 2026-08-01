@@ -49,6 +49,8 @@ signals:
                                       quint16 peerPort);
     void requestStartAudio();
     void requestStopAudio();
+    void requestPlayLocalAecTestTone();
+    void requestVerifyLocalAecEffect();
     void requestRemoteJpegDecode(const QByteArray &jpegData,
                                  quint64 generation,
                                  quint32 sessionId,
@@ -119,6 +121,20 @@ private slots:
     void onAudioStopped();
     void onAudioError(const QString &message);
     void onAudioStatisticsUpdated(const AudioStatistics &statistics);
+    void onPlaybackVolumeUpdated(int rmsPercent, double rmsDbfs);
+    void onPlayLocalAecTestToneClicked();
+    void onVerifyLocalAecEffectClicked();
+    void onLocalAecTestToneStateChanged(bool active);
+    void onLocalAecDelayCalibrated(int delayMs, double correlation, double captureRmsDbfs);
+    void onLocalAecDelayCalibrationFailed(const QString &reason);
+    void onLocalAecEffectVerificationStateChanged(bool active);
+    void onLocalAecEffectVerified(int measuredDelayMs,
+                                  double echoReductionDb,
+                                  double rawEchoRmsDbfs,
+                                  double processedEchoRmsDbfs,
+                                  double rawCorrelation,
+                                  double processedCorrelation);
+    void onLocalAecEffectVerificationFailed(const QString &reason);
 
 private:
     struct PendingRemoteJpegFrame
@@ -141,6 +157,7 @@ private:
     void setAudioStatus(const QString &primaryText,
                         const QString &secondaryText = QString(),
                         const QString &details = QString());
+    void setPlaybackVolumeDisplay(int rmsPercent, double rmsDbfs);
     void refreshAudioStatusText();
     QString elidedTextForLabel(const QLabel *label, const QString &text) const;
     void shutdownCameraThread();
