@@ -15,6 +15,9 @@ public:
     explicit RemoteVideoDecoder(QObject *parent = nullptr);
     ~RemoteVideoDecoder() override;
 
+    static int destructionCount();
+    static void resetDestructionCount();
+
 signals:
     void frameDecoded(const QImage &image,
                       qsizetype jpegSize,
@@ -35,6 +38,7 @@ signals:
                            quint16 senderPort);
 
 public slots:
+    void shutdown();
     void decodeJpeg(const QByteArray &jpegData,
                     quint64 generation,
                     quint32 sessionId,
@@ -42,6 +46,9 @@ public slots:
                     quint32 timestampMs,
                     const QString &senderAddress,
                     quint16 senderPort);
+
+private:
+    bool m_shutdown = false;
 };
 
 #endif // REMOTEVIDEODECODER_H

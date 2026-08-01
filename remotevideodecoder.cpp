@@ -3,15 +3,48 @@
 #include "jpegframedecoder.h"
 
 #include <QElapsedTimer>
+#include <QDebug>
+#include <QThread>
 
+#include <atomic>
 #include <exception>
+
+namespace {
+
+std::atomic_int g_remoteVideoDecoderDestructionCount{0};
+
+} // namespace
 
 RemoteVideoDecoder::RemoteVideoDecoder(QObject *parent)
     : QObject(parent)
 {
 }
 
-RemoteVideoDecoder::~RemoteVideoDecoder() = default;
+RemoteVideoDecoder::~RemoteVideoDecoder()
+{
+    shutdown();
+    const int destructionCount = ++g_remoteVideoDecoderDestructionCount;
+    qInfo().nospace() << "[RemoteVideoDecoder] destroyed #" << destructionCount
+                      << " this=" << static_cast<const void *>(this)
+                      << " currentThreadId=" << QThread::currentThreadId()
+                      << " objectThread=" << thread()
+                      << " objectThreadRunning=" << (thread() && thread()->isRunning());
+}
+
+int RemoteVideoDecoder::destructionCount()
+{
+    return g_remoteVideoDecoderDestructionCount.load();
+}
+
+void RemoteVideoDecoder::resetDestructionCount()
+{
+    g_remoteVideoDecoderDestructionCount.store(0);
+}
+
+void RemoteVideoDecoder::shutdown()
+{
+    m_shutdown = true;
+}
 
 void RemoteVideoDecoder::decodeJpeg(const QByteArray &jpegData,
                                     quint64 generation,
@@ -21,6 +54,9 @@ void RemoteVideoDecoder::decodeJpeg(const QByteArray &jpegData,
                                     const QString &senderAddress,
                                     quint16 senderPort)
 {
+    if (m_shutdown) {
+        return;
+    }
     QElapsedTimer decodingTimer;
     decodingTimer.start();
 

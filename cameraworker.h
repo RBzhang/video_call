@@ -19,6 +19,9 @@ public:
     explicit CameraWorker(QObject *parent = nullptr);
     ~CameraWorker() override;
 
+    static int destructionCount();
+    static void resetDestructionCount();
+
 signals:
     void frameReady(const QImage &image);
     void cameraStarted(const QString &description);
@@ -37,6 +40,7 @@ public slots:
     void stopCamera();
     void startVideoEncoding(int targetFps, int jpegQuality);
     void stopVideoEncoding();
+    void shutdown();
 
 private slots:
     void captureFrame();

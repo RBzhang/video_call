@@ -106,10 +106,6 @@ MainWindow::MainWindow(QWidget *parent)
             &QThread::finished,
             m_remoteDecoder,
             &QObject::deleteLater);
-    connect(m_remoteDecoder,
-            &QObject::destroyed,
-            this,
-            [this] { m_remoteDecoder = nullptr; });
     connect(this,
             &MainWindow::requestRemoteJpegDecode,
             m_remoteDecoder,
@@ -136,10 +132,6 @@ MainWindow::MainWindow(QWidget *parent)
             &QThread::finished,
             m_audioWorker,
             &QObject::deleteLater);
-    connect(m_audioWorker,
-            &QObject::destroyed,
-            this,
-            [this] { m_audioWorker = nullptr; });
     connect(this,
             &MainWindow::requestConfigureAudioNetwork,
             m_audioWorker,
@@ -190,10 +182,6 @@ MainWindow::MainWindow(QWidget *parent)
             &QThread::finished,
             m_cameraWorker,
             &QObject::deleteLater);
-    connect(m_cameraWorker,
-            &QObject::destroyed,
-            this,
-            [this] { m_cameraWorker = nullptr; });
 
     connect(this,
             &MainWindow::requestStartCamera,
@@ -304,28 +292,68 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
-    stopVideoSending(QString());
-    if (m_videoUdpTransport) {
-        m_videoUdpTransport->close();
-    }
-    resetRemoteReceiveState(QStringLiteral("远端接收：网络已停止"));
-    shutdownAudioThread();
-    shutdownRemoteDecoderThread();
-    shutdownCameraThread();
+    shutdownAll();
     delete ui;
+    ui = nullptr;
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    stopVideoSending(QStringLiteral("视频发送：窗口正在关闭。"));
+    shutdownAll();
+    QMainWindow::closeEvent(event);
+}
+
+void MainWindow::shutdownAll()
+{
+    if (m_shuttingDown) {
+        return;
+    }
+
+    m_shuttingDown = true;
+    m_cameraRunning = false;
+    m_cameraOpening = false;
+    m_videoSending = false;
+    m_audioRunning = false;
+    m_audioNetworkSettingsValid = false;
+    m_networkSettingsValid = false;
+    m_pendingRemoteJpeg.reset();
+    m_remoteDecodeBusy = false;
+    advanceRemoteReceiveGeneration();
+
+    if (m_videoStatsTimer) {
+        m_videoStatsTimer->stop();
+    }
+    if (m_remoteStatsTimer) {
+        m_remoteStatsTimer->stop();
+    }
+
     if (m_videoUdpTransport) {
+        disconnect(m_videoUdpTransport, nullptr, this, nullptr);
         m_videoUdpTransport->close();
     }
-    resetRemoteReceiveState(QStringLiteral("远端接收：网络已停止"));
+    if (m_cameraWorker) {
+        disconnect(this, nullptr, m_cameraWorker.data(), nullptr);
+        disconnect(m_cameraWorker.data(), nullptr, this, nullptr);
+    }
+    if (m_audioWorker) {
+        disconnect(this, nullptr, m_audioWorker.data(), nullptr);
+        disconnect(m_audioWorker.data(), nullptr, this, nullptr);
+    }
+    if (m_remoteDecoder) {
+        disconnect(this, nullptr, m_remoteDecoder.data(), nullptr);
+        disconnect(m_remoteDecoder.data(), nullptr, this, nullptr);
+    }
+
+    qInfo().noquote() << QStringLiteral("[MainWindow] shutdownAll: stopping worker threads.");
     shutdownAudioThread();
     shutdownRemoteDecoderThread();
     shutdownCameraThread();
-    QMainWindow::closeEvent(event);
+
+    m_shutdownCompleted = !m_audioThread && !m_remoteDecoderThread && !m_cameraThread
+        && m_audioWorker.isNull() && m_remoteDecoder.isNull() && m_cameraWorker.isNull();
+    qInfo().noquote() << QStringLiteral("[MainWindow] shutdownAll complete; workers destroyed:")
+                      << m_shutdownCompleted;
+    emit shutdownCompleted(m_shutdownCompleted);
 }
 
 void MainWindow::resizeEvent(QResizeEvent *event)
@@ -819,7 +847,8 @@ void MainWindow::onUdpFrameReceived(const QByteArray &encodedFrame,
                                     const QHostAddress &senderAddress,
                                     quint16 senderPort)
 {
-    if (!m_networkSettingsValid || !m_videoUdpTransport || !m_videoUdpTransport->isBound()) {
+    if (m_shuttingDown || !m_networkSettingsValid || !m_videoUdpTransport
+        || !m_videoUdpTransport->isBound()) {
         return;
     }
     if (senderAddress != m_peerAddress || senderPort != m_peerVideoPort) {
@@ -868,7 +897,7 @@ void MainWindow::onUdpFrameSent(quint32 frameId,
                                 qsizetype frameSize,
                                 qsizetype fragmentCount)
 {
-    if (m_videoSending) {
+    if (m_shuttingDown || m_videoSending) {
         return;
     }
 
@@ -883,6 +912,9 @@ void MainWindow::onUdpFrameSent(quint32 frameId,
 
 void MainWindow::onUdpNetworkError(const QString &message)
 {
+    if (m_shuttingDown) {
+        return;
+    }
     if (m_videoSending) {
         stopVideoSending(QStringLiteral("视频发送：UDP 本地错误：%1").arg(message));
     }
@@ -891,6 +923,9 @@ void MainWindow::onUdpNetworkError(const QString &message)
 
 void MainWindow::onUdpDatagramRejected(const QString &message)
 {
+    if (m_shuttingDown) {
+        return;
+    }
     ui->networkStatusLabel->setText(QStringLiteral("网络：已拒绝数据报：%1").arg(message));
 }
 
@@ -911,14 +946,13 @@ void MainWindow::onCameraStarted(const QString &description)
 
 void MainWindow::onCameraStopped()
 {
+    if (m_shuttingDown) {
+        return;
+    }
     stopVideoSending(QStringLiteral("视频发送：摄像头已停止。"));
     m_cameraRunning = false;
     m_cameraOpening = false;
     m_lastFrame = QImage();
-
-    if (m_shuttingDown) {
-        return;
-    }
 
     resetCameraUi();
     setLocalVideoStatus(QStringLiteral("状态：已停止"));
@@ -926,11 +960,11 @@ void MainWindow::onCameraStopped()
 
 void MainWindow::onCameraError(const QString &message)
 {
-    stopVideoSending(QStringLiteral("视频发送：摄像头错误，已停止。"));
     if (m_shuttingDown) {
         return;
     }
 
+    stopVideoSending(QStringLiteral("视频发送：摄像头错误，已停止。"));
     m_cameraRunning = false;
     m_cameraOpening = false;
     m_lastFrame = QImage();
@@ -963,7 +997,7 @@ void MainWindow::onJpegFrameReady(const QByteArray &jpegData,
                                   int jpegQuality,
                                   qint64 encodingDurationUs)
 {
-    if (!m_videoSending) {
+    if (m_shuttingDown || !m_videoSending) {
         return;
     }
     if (jpegData.isEmpty()) {
@@ -1006,6 +1040,9 @@ void MainWindow::onJpegFrameReady(const QByteArray &jpegData,
 
 void MainWindow::onVideoEncodingError(const QString &message)
 {
+    if (m_shuttingDown) {
+        return;
+    }
     if (m_videoSending) {
         stopVideoSending(QStringLiteral("视频发送：JPEG 编码错误：%1").arg(message));
         return;
@@ -1538,60 +1575,39 @@ void MainWindow::shutdownAudioThread()
     }
 
     const bool calledFromAudioThread = QThread::currentThread() == audioThread;
-    Q_ASSERT(!calledFromAudioThread);
     if (calledFromAudioThread) {
         qCritical().noquote()
             << QStringLiteral("[MainWindow] 禁止在音频线程中等待自身退出。");
         return;
     }
 
-    m_audioRunning = false;
-    m_audioNetworkSettingsValid = false;
-    if (m_audioWorker) {
-        disconnect(m_audioWorker, nullptr, this, nullptr);
-    }
-
     if (audioThread->isRunning() && m_audioWorker) {
-        qInfo().noquote() << QStringLiteral("[MainWindow] 开始停止 AudioWorker。");
+        qInfo().nospace() << "[MainWindow] shutdown AudioWorker this="
+                          << static_cast<const void *>(m_audioWorker.data())
+                          << " thread=" << audioThread;
         const bool shutdownInvoked = QMetaObject::invokeMethod(
-            m_audioWorker,
+            m_audioWorker.data(),
             &AudioWorker::shutdown,
             Qt::BlockingQueuedConnection);
         if (!shutdownInvoked) {
             qCritical().noquote() << QStringLiteral("[MainWindow] AudioWorker::shutdown 调用未投递。");
-            return;
         }
-        qInfo().noquote() << QStringLiteral("[MainWindow] AudioWorker::shutdown 完成。");
-
-        qInfo().noquote() << QStringLiteral("[MainWindow] 开始 quit 音频线程。");
-        const bool quitInvoked = QMetaObject::invokeMethod(
-            m_audioWorker,
-            [] { QThread::currentThread()->quit(); },
-            Qt::BlockingQueuedConnection);
-        if (!quitInvoked) {
-            qCritical().noquote()
-                << QStringLiteral("[MainWindow] 音频 QThread::quit() 调用未投递。");
-            return;
-        }
-    } else if (audioThread->isRunning()) {
-        qWarning().noquote()
-            << QStringLiteral("[MainWindow] AudioWorker 已销毁，直接 quit 音频线程。");
-        audioThread->quit();
     }
 
+    audioThread->quit();
     const bool waitSucceeded = audioThread->wait();
-    qInfo().noquote()
-        << QStringLiteral("[MainWindow] 音频线程 wait 返回：") << waitSucceeded;
-    Q_ASSERT(waitSucceeded);
     if (!waitSucceeded) {
         qCritical().noquote()
             << QStringLiteral("[MainWindow] 音频线程未结束，拒绝删除 QThread。");
         return;
     }
+    if (m_audioWorker) {
+        qCritical().noquote()
+            << QStringLiteral("[MainWindow] AudioWorker 在线程结束后未销毁，拒绝删除其 QThread。");
+        return;
+    }
 
-    m_audioWorker = nullptr;
     m_audioThread = nullptr;
-    qInfo().noquote() << QStringLiteral("[MainWindow] 删除音频 QThread。");
     delete audioThread;
 }
 
@@ -1606,111 +1622,84 @@ void MainWindow::shutdownRemoteDecoderThread()
     }
 
     const bool calledFromDecoderThread = QThread::currentThread() == decoderThread;
-    Q_ASSERT(!calledFromDecoderThread);
     if (calledFromDecoderThread) {
         qCritical().noquote()
             << QStringLiteral("[MainWindow] 禁止在远端解码线程中等待自身退出。");
         return;
     }
 
-    if (m_remoteDecoder) {
-        disconnect(this,
-                   &MainWindow::requestRemoteJpegDecode,
-                   m_remoteDecoder,
-                   &RemoteVideoDecoder::decodeJpeg);
-        disconnect(m_remoteDecoder,
-                   &RemoteVideoDecoder::frameDecoded,
-                   this,
-                   &MainWindow::onRemoteFrameDecoded);
-        disconnect(m_remoteDecoder,
-                   &RemoteVideoDecoder::frameDecodeFailed,
-                   this,
-                   &MainWindow::onRemoteFrameDecodeFailed);
+    if (decoderThread->isRunning() && m_remoteDecoder) {
+        qInfo().nospace() << "[MainWindow] shutdown RemoteVideoDecoder this="
+                          << static_cast<const void *>(m_remoteDecoder.data())
+                          << " thread=" << decoderThread;
+        const bool shutdownInvoked = QMetaObject::invokeMethod(
+            m_remoteDecoder.data(),
+            &RemoteVideoDecoder::shutdown,
+            Qt::BlockingQueuedConnection);
+        if (!shutdownInvoked) {
+            qCritical().noquote()
+                << QStringLiteral("[MainWindow] RemoteVideoDecoder::shutdown 调用未投递。");
+        }
     }
 
-    qInfo().noquote() << QStringLiteral("[MainWindow] 开始 quit 远端 JPEG 解码线程。");
     decoderThread->quit();
     const bool waitSucceeded = decoderThread->wait();
-    qInfo().noquote()
-        << QStringLiteral("[MainWindow] 远端 JPEG 解码线程 wait 返回：") << waitSucceeded;
-
-    Q_ASSERT(waitSucceeded);
     if (!waitSucceeded) {
         qCritical().noquote()
             << QStringLiteral("[MainWindow] 远端 JPEG 解码线程未结束，拒绝删除 QThread。");
         return;
     }
+    if (m_remoteDecoder) {
+        qCritical().noquote()
+            << QStringLiteral("[MainWindow] RemoteVideoDecoder 在线程结束后未销毁，拒绝删除其 QThread。");
+        return;
+    }
 
     m_remoteDecodeBusy = false;
     m_remoteDecoderThread = nullptr;
-    m_remoteDecoder = nullptr;
-    qInfo().noquote() << QStringLiteral("[MainWindow] 删除远端 JPEG 解码 QThread。");
     delete decoderThread;
 }
 
 void MainWindow::shutdownCameraThread()
 {
-    if (m_shuttingDown) {
-        return;
-    }
-
-    m_shuttingDown = true;
-    m_cameraOpening = false;
-
     QThread *cameraThread = m_cameraThread;
     if (!cameraThread) {
         return;
     }
 
     const bool calledFromCameraThread = QThread::currentThread() == cameraThread;
-    Q_ASSERT(!calledFromCameraThread);
     if (calledFromCameraThread) {
         qCritical().noquote()
             << QStringLiteral("[MainWindow] 禁止在摄像头线程中等待自身退出。");
         return;
     }
 
-    if (!m_cameraWorker) {
-        qCritical().noquote() << QStringLiteral("[MainWindow] CameraWorker 不可用，无法执行安全退出。");
-        return;
+    if (cameraThread->isRunning() && m_cameraWorker) {
+        qInfo().nospace() << "[MainWindow] shutdown CameraWorker this="
+                          << static_cast<const void *>(m_cameraWorker.data())
+                          << " thread=" << cameraThread;
+        const bool shutdownInvoked = QMetaObject::invokeMethod(
+            m_cameraWorker.data(),
+            &CameraWorker::shutdown,
+            Qt::BlockingQueuedConnection);
+        if (!shutdownInvoked) {
+            qCritical().noquote() << QStringLiteral("[MainWindow] CameraWorker::shutdown 调用未投递。");
+        }
     }
 
-    qInfo().noquote() << QStringLiteral("[MainWindow] 开始停止 CameraWorker。");
-    const bool stopInvoked = QMetaObject::invokeMethod(
-        m_cameraWorker,
-        &CameraWorker::stopCamera,
-        Qt::BlockingQueuedConnection);
-    if (!stopInvoked) {
-        qCritical().noquote() << QStringLiteral("[MainWindow] stopCamera 调用未投递。");
-        return;
-    }
-    qInfo().noquote() << QStringLiteral("[MainWindow] stopCamera 完成。");
-
-    qInfo().noquote() << QStringLiteral("[MainWindow] 开始 quit 摄像头线程。");
-    const bool quitInvoked = QMetaObject::invokeMethod(
-        m_cameraWorker,
-        [] { QThread::currentThread()->quit(); },
-        Qt::BlockingQueuedConnection);
-    if (!quitInvoked) {
-        qCritical().noquote()
-            << QStringLiteral("[MainWindow] QThread::quit() 调用未投递。");
-        return;
-    }
-
+    cameraThread->quit();
     const bool waitSucceeded = cameraThread->wait();
-    qInfo().noquote()
-        << QStringLiteral("[MainWindow] 摄像头线程 wait 返回：") << waitSucceeded;
-
-    Q_ASSERT(waitSucceeded);
     if (!waitSucceeded) {
         qCritical().noquote()
             << QStringLiteral("[MainWindow] 摄像头线程未结束，拒绝删除 QThread。");
         return;
     }
+    if (m_cameraWorker) {
+        qCritical().noquote()
+            << QStringLiteral("[MainWindow] CameraWorker 在线程结束后未销毁，拒绝删除其 QThread。");
+        return;
+    }
 
     m_cameraThread = nullptr;
-    m_cameraWorker = nullptr;
-
-    qInfo().noquote() << QStringLiteral("[MainWindow] 删除 QThread。");
     delete cameraThread;
 }
